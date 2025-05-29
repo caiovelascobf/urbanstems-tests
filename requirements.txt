@@ -1,0 +1,3 @@
+# Integration Other Tools
+requests # Allows you to send HTTP/1.1 requests extremely easily
+python-dotenv # Reads key-value pairs from a .env file and can set them as environment variables
