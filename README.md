@@ -5,6 +5,7 @@
 - [Setup Instructions](#setup-instructions)
   - [Prerequisites](#prerequisites)
   - [Environment Variables](#environment-variables)
+  - [SSH GitHub Setup](#ssh-github-setup)
   - [Build and Run](#build-and-run)
 
 ## Setup Instructions
@@ -36,6 +37,108 @@ The .gitignore file, ignores the `.env` file for security reasons. However, sinc
 If you want to check the environment variables from your current folder, do:
 * printenv (this will show if the environmental variables were loaded within the Docker container)
 * printenv | grep HEVO (this functions as a filter to show only the variables that contain 'HEVO')
+
+### SSH GitHub Setup
+
+This guide documents how to configure a dedicated SSH key for pushing to GitHub as the user **`caiovelascobf`**, using a clean and secure workflow.
+
+---
+
+1. **Generate a New SSH Key**
+
+```bash
+ssh-keygen -t ed25519 -C "your_email_for_caiovelascobf"
+```
+
+- When prompted:
+  - **Save key as**: `/c/Users/YOUR_USERNAME/.ssh/id_ed25519_caiovelascobf`
+  - **Optional passphrase**: enter one or leave it blank
+
+---
+
+2. **Add SSH Key to GitHub**
+
+```bash
+cat ~/.ssh/id_ed25519_caiovelascobf.pub
+```
+
+- Copy the output
+- Go to GitHub → `Settings > SSH and GPG Keys`
+- Click **"New SSH key"**
+- Name it (e.g., `caiovelascobf_work`)
+- Paste and save the key
+
+---
+
+3. **Configure SSH to Use This Key**
+
+Edit (or create) your SSH config file:
+
+```bash
+nano ~/.ssh/config
+```
+
+Add:
+
+```ssh
+Host github-caiovelascobf
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_ed25519_caiovelascobf
+  IdentitiesOnly yes
+```
+
+This creates a GitHub alias that tells SSH to use this specific key when connecting.
+
+---
+
+4. **Update the Git Remote**
+
+In your project folder:
+
+```bash
+git remote set-url origin git@github-caiovelascobf:caiovelascobf/REPO_NAME.git
+```
+
+Verify:
+
+```bash
+git remote -v
+```
+
+Expected:
+
+```
+origin  git@github-caiovelascobf:caiovelascobf/REPO_NAME.git (fetch)
+origin  git@github-caiovelascobf:caiovelascobf/REPO_NAME.git (push)
+```
+
+---
+
+### 5. **Test SSH Authentication**
+
+```bash
+ssh -T git@github-caiovelascobf
+```
+
+Expected:
+
+```
+Hi caiovelascobf! You've successfully authenticated, but GitHub does not provide shell access.
+```
+
+---
+
+### 6. **Push to GitHub**
+
+```bash
+git add .
+git commit -m "Your commit message"
+git push origin main
+```
+
+You should now be pushing as the `caiovelascobf` user via the correct SSH key.
+
 
 ### Build and Run
 
