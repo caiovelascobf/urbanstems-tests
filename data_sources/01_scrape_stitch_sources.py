@@ -10,7 +10,7 @@ import time
 EDGE_DRIVER_PATH = "C:/edgedriver/msedgedriver.exe"
 STITCH_SOURCES_URL = "https://app.stitchdata.com/client/100557/pipeline/v2/sources"
 SOURCE_OUTPUT_CSV = "01_csv_stitch_sources.csv"
-MAX_SOURCES = float('inf')  # Set to a number like 10 for testing
+MAX_SOURCES = 1  # Process all sources: float('inf'), Set to a number like 10 for testing
 
 # === Setup Edge
 driver = webdriver.Edge(service=EdgeService(executable_path=EDGE_DRIVER_PATH))
