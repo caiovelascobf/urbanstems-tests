@@ -9,21 +9,16 @@ OUTPUT_CSV = "04_csv_redshift_and_ingestion_schemas.csv"
 df_query = pd.read_csv(QUERY_CSV)
 df_ingestion = pd.read_csv(INGESTION_CSV)
 
-# === Normalize schema name fields for reliable matching
+# === Normalize schema name columns for consistent matching
 df_query["Schema Name"] = df_query["Schema Name"].astype(str).str.strip().str.lower()
 df_ingestion["DB Schema Name"] = df_ingestion["DB Schema Name"].astype(str).str.strip().str.lower()
 
-# === Merge on schema name
-df_merged = df_query.merge(
-    df_ingestion[["DB Schema Name", "Ingestion Tool"]],
-    left_on="Schema Name",
-    right_on="DB Schema Name",
-    how="left"
-)
+# === Build a mapping from DB Schema Name to Ingestion Tool
+schema_to_tool = df_ingestion.set_index("DB Schema Name")["Ingestion Tool"].to_dict()
 
-# === Drop merge key duplicate
-df_merged.drop(columns=["DB Schema Name"], inplace=True)
+# === Add Ingestion Tool column to Redshift query data
+df_query["Ingestion Tool"] = df_query["Schema Name"].map(schema_to_tool)
 
-# === Save result
-df_merged.to_csv(OUTPUT_CSV, index=False)
-print(f"✅ Merged output saved to {OUTPUT_CSV}")
+# === Save the enriched output
+df_query.to_csv(OUTPUT_CSV, index=False)
+print(f"✅ Enriched Redshift usage data saved to {OUTPUT_CSV}")
