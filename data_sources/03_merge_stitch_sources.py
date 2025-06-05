@@ -11,7 +11,7 @@ df_tables = pd.read_csv(TABLE_CSV)
 
 # === Merge on "Source Name" and bring in additional columns
 df_merged = df_tables.merge(
-    df_sources[["Source Name", "Frequency", "Destination", "DB Schema Name"]],
+    df_sources[["Source Name", "Frequency", "Destination", "DB Schema Name", "Status"]],
     on="Source Name",
     how="left"  # keep all table-level rows even if some don't match
 )
