@@ -1,7 +1,7 @@
 import pandas as pd
 
 # === Input CSVs
-SOURCE_CSV = "01_csv_stitch_sources_freq_dest.csv"
+SOURCE_CSV = "01_csv_stitch_sources_freq_dest_schema.csv" 
 TABLE_CSV = "02_csv_stitch_tables.csv"
 OUTPUT_CSV = "03_csv_stitch_merged_source_tables.csv"
 
@@ -9,9 +9,9 @@ OUTPUT_CSV = "03_csv_stitch_merged_source_tables.csv"
 df_sources = pd.read_csv(SOURCE_CSV)
 df_tables = pd.read_csv(TABLE_CSV)
 
-# === Merge on "Source Name"
+# === Merge on "Source Name" and bring in additional columns
 df_merged = df_tables.merge(
-    df_sources[["Source Name", "Frequency", "Destination"]],
+    df_sources[["Source Name", "Frequency", "Destination", "DB Schema Name"]],
     on="Source Name",
     how="left"  # keep all table-level rows even if some don't match
 )
