@@ -1,8 +1,8 @@
 import pandas as pd
 
 # === Input files
-QUERY_CSV = "redshift_brainforge_google_sheet.csv"
-INGESTION_CSV = "final_brainforge_google_sheet_ingestion_table_level.csv"
+QUERY_CSV = r"raw\brainforge_redshift_audit_tab_google_sheet.csv"
+INGESTION_CSV = r"raw\brainforge_ingestion_tables_audit_tab_google_sheet.csv"
 OUTPUT_CSV = "04_csv_redshift_and_ingestion_schemas.csv"
 
 # === Load both datasets

@@ -1,6 +1,4 @@
-# Listing all Hevo Data Sources
-
-## Table of Contents
+## Setup
 
 - [Setup Instructions](#setup-instructions)
   - [Prerequisites](#prerequisites)

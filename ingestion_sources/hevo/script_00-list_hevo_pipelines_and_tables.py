@@ -1,8 +1,26 @@
+"""
+
+This script connects to the Hevo Data API to retrieve pipeline and table-level metadata.
+It summarizes pipeline configurations and exports three CSV files, with filenames prefixed
+by 'script_00-' and the current date in 'YYYY_MM_DD' format.
+
+Exports:
+    1. script_00-YYYY_MM_DD_hevo_pipelines.csv            — Summary of pipeline configurations
+    2. script_00-YYYY_MM_DD_hevo_pipelines_table_level.csv — Table-level details per pipeline
+    3. script_00-YYYY_MM_DD_hevo_pipelines_final.csv       — Combined pipeline and table-level data
+
+Usage:
+    - Requires a `.env` file with HEVO_API_ACCESS_KEY and HEVO_API_SECRET_KEY.
+    - Run with Python 3.x
+
+"""
+
 import os
 import csv
 import base64
 import requests
 import json
+from datetime import datetime
 from dotenv import load_dotenv
 
 # Load API credentials from .env
@@ -10,8 +28,12 @@ load_dotenv()
 API_KEY = os.getenv("HEVO_API_ACCESS_KEY")
 API_SECRET = os.getenv("HEVO_API_SECRET_KEY")
 BASE_URL = "https://us2.hevodata.com"
-PIPELINE_CSV = "hevo_pipelines.csv"
-TABLE_CSV = "hevo_pipelines_table_level.csv"
+
+# Add prefix and date in YYYY_MM_DD format to filenames
+date_prefix = datetime.today().strftime('script_00-%Y_%m_%d')
+PIPELINE_CSV = f"{date_prefix}_hevo_pipelines.csv"
+TABLE_CSV = f"{date_prefix}_hevo_pipelines_table_level.csv"
+FINAL_CSV = f"{date_prefix}_hevo_pipelines_final.csv"
 
 # Encode credentials for Basic Auth
 credentials = f"{API_KEY}:{API_SECRET}"
@@ -79,19 +101,7 @@ def main():
         print("No pipelines found.")
         return
 
-    # Print full JSON of raw_pipelines[2] with its objects
-    # if len(raw_pipelines) > 2:
-    #     selected_pipeline = raw_pipelines[2]
-    #     pipeline_id = selected_pipeline.get("id")
-    #     try:
-    #         objects = get_pipeline_objects(pipeline_id)
-    #         selected_pipeline["objects"] = objects
-    #         print("\n🔎 Full JSON for raw_pipelines[2] WITH objects:\n")
-    #         print(json.dumps(selected_pipeline, indent=2))
-    #     except Exception as e:
-    #         print(f"Failed to get objects for pipeline {pipeline_id}: {e}")
-
-    # Generate pipeline summary CSV
+    # Write summarized pipeline data
     summarized = [summarize_pipeline(p) for p in raw_pipelines]
     pipeline_fieldnames = [
         "Status", "Source", "Schedule Type", "Frequency (Pipeline)",
@@ -100,7 +110,7 @@ def main():
     ]
     write_to_csv(summarized, PIPELINE_CSV, pipeline_fieldnames)
 
-    # Generate table-level CSV with object details
+    # Write table-level data
     table_data = []
     for pipeline in raw_pipelines:
         pipeline_id = pipeline.get("id")
@@ -127,14 +137,11 @@ def main():
             })
 
     table_fieldnames = [
-        "Pipeline Status",
-        "Pipeline ID",
-        "Pipeline Name",
-        "Table Name",
-        "Table Status"
+        "Pipeline Status", "Pipeline ID", "Pipeline Name", "Table Name", "Table Status"
     ]
-    
-        # Generate merged final CSV
+    write_to_csv(table_data, TABLE_CSV, table_fieldnames)
+
+    # Write merged final CSV
     final_data = []
     for pipeline in raw_pipelines:
         pipeline_id = pipeline.get("id")
@@ -181,9 +188,7 @@ def main():
         "Frequency (Pipeline)", "Frequency (Destination)", "Destination",
         "DB Name", "DB Schema Name", "DB User", "DB Port", "DB Host"
     ]
-    write_to_csv(final_data, "hevo_pipelines_final.csv", final_fieldnames)
+    write_to_csv(final_data, FINAL_CSV, final_fieldnames)
 
 if __name__ == "__main__":
     main()
-
-
