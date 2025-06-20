@@ -1,96 +1,116 @@
-## 🧠 DBT-to-Looker Mapping Strategy: Organized Thinking
+## 🧠 DBT-to-Looker Mapping Strategy (Updated)
 
 ### 🎯 Objective
 
-Build a mapping between **DBT models** and **Looker Dashboards**, to understand which dashboards rely on which DBT models and vice versa. This allows traceability from data transformation (DBT) to visualization (Looker).
+Build a mapping between **DBT models** and **Looker dashboards**, allowing end-to-end data lineage — from DBT model code to Redshift tables, through LookML views and explores, all the way to dashboard tiles. This enables change impact analysis, auditing, and better collaboration between data engineering and BI teams.
 
 ---
 
 ### 📥 Inputs
 
 1. **Looker LookML repo (`looker-master`)**
-   - `.view.lkml` and `.model.lkml` files
-   - Source of `sql_table_name` and `derived_table` queries (includes actual Redshift tables used)
+   - Includes all `.lkml` files (`.view.lkml`, `.model.lkml`)
+   - Source of:
+     - `sql_table_name` (direct table reference)
+     - `derived_table` SQL blocks
+     - `explore:` definitions (via model files)
 
 2. **Looker System Activity export (CSV)**
    - Dashboard metadata
-   - Includes: `Dashboard ID`, `Dashboard Title`, `Query Explore`, `Query Model`
+   - Includes:
+     - `dashboard_id_(user-defined_only)`
+     - `dashboard_title`
+     - `query_model`
+     - `query_explore`
 
 3. **DBT model list (CSV)**
-   - Raw list of `.sql` files like `orders.sql`, `user_metrics.sql`
+   - List of `.sql` files such as `orders.sql`, `user_metrics.sql`
+   - Derivable names: `orders`, `user_metrics`
 
 4. *(Optional)* **Redshift information**
-   - Used to validate whether a dbt model has been materialized in Redshift (e.g., under `analytics.analytics.dbt_model_name`)
+   - Used to validate materialization (e.g., tables like `analytics.orders` or `analytics.analytics.orders`)
 
 ---
 
 ### ⚙️ Processing Steps
 
-#### 🔹 Step 1: Extract Table Usage from Looker Views
+#### 🔹 Step 1: Extract View + Explore Table Usage
 
-- **Script:** `script_01-looker_views_and_its_tables_mapping.csv`
-- Extract:
-  - `view_name`
-  - `sql_table_name` (direct)
-  - `derived_table_sources` (via parsing SQL: all `FROM`/`JOIN` targets)
-- Output: Redshift tables used per LookML view
+- **Script:** `script_01-extracting_looker_tables_from_views_and_models.py`
+- Recursively scans all `.lkml` files to extract:
+  - `view_or_model_name` → name of the view or explore
+  - `model_name` → from model file names
+  - `sql_table_name` → direct table mapping
+  - `derived_table_sources` → extracted from `derived_table { sql: ... }` blocks
+  - `lkml_file` → source file path
+- Output: `script_01-extracting_looker_tables_from_views_and_models.csv`
 
-#### 🔹 Step 2: Map Looker Dashboards → Views → Redshift Tables
+#### 🔹 Step 2: Map Dashboards → Explores → LookML → Redshift Tables
 
-- **Script:** `script_02-dashboards_to_views_to_redshift.csv`
-- Join the System Activity dashboard data to LookML views by `query_explore` = `view_name`
-- Resolve Redshift tables used by each dashboard
-- Also generate an **exploded** version: one row per dashboard-table pair
+- **Script:** `script_02-dashboards_to_views_to_redshift.py`
+- Joins:
+  - `query_explore` from Looker System Activity
+  - with `view_or_model_name` from script_01
+- Resolves and combines:
+  - `sql_table_name`
+  - `derived_table_sources`
+- Produces:
+  - Full mapping: `dashboard_id`, `dashboard_title`, `query_model`, `query_explore`, `lkml_file`, `view_or_model_name`, `redshift_tables`
+  - Exploded mapping: one row per dashboard-table pair
+- Outputs:
+  - `script_02-dashboards_to_views_to_redshift.csv`
+  - `script_02-dashboards_to_views_to_redshift_exploded.csv`
 
 #### 🔹 Step 3: Match DBT Models to Redshift Tables
 
-- **Script:** `script_03-dbt_models_to_dashboards.csv`
-- Convert each DBT model (e.g., `orders.sql`) to:
-  - `dbt_model_name` = `orders`
-  - `potential_full_path` = `analytics.orders` or `analytics.analytics.orders`
-- Match these names against the Redshift tables extracted in Step 2 (exploded)
-- Result: list of dashboards using tables that correspond to DBT models
+- **Script:** `script_03-dbt_models_to_dashboards.py` (custom logic)
+- Converts DBT models (`orders.sql`) into candidate Redshift tables:
+  - `analytics.orders`
+  - `analytics.analytics.orders`
+- Performs string-based matching against `redshift_table` column from exploded output (Step 2)
+- Creates DBT model → dashboard associations
 
-#### 🔹 Step 4: Reverse Mapping: Dashboards → DBT Models
+#### 🔹 Step 4: Reverse Map Dashboards → DBT Models
 
-- (Same logic as above, reversed)
-- Group all matched DBT models by dashboard title
-- Output: which DBT models feed each dashboard
+- Inverts the mapping from Step 3
+- Aggregates DBT models by dashboard title
+- Useful for traceability and documentation
 
 ---
 
 ### 📤 Outputs
 
-You now have two useful views:
-
 #### ✅ Tab: **DBT Models → Dashboards**
 
-- For each DBT model, which dashboards are *using* it (via Redshift tables)
-- This supports impact analysis: *“If I change this DBT model, who gets affected?”*
+- For each DBT model:
+  - Which dashboards rely on its output table
+- Use case: *“If I change this model, what dashboards might break?”*
 
 #### ✅ Tab: **Dashboards → DBT Models**
 
-- For each dashboard, what DBT models it depends on
-- Helps explain data lineage: *“Where does this chart's data come from?”*
+- For each dashboard:
+  - Which DBT models its tiles depend on (via Redshift table lineage)
+- Use case: *“Where does this metric come from?”*
 
 ---
 
 ### ⚠️ Gaps & Limitations
 
-- Some rows are blank:
-  - Many DBT models may not be materialized in Redshift
-  - Some Looker dashboards may use non-DBT tables or legacy views
-- Views with *heavily derived SQL logic* or non-standard joins may be partially parsed
-- Matching is done by **string logic**, not by full SQL lineage graphs
+- DBT models not materialized in Redshift will not match
+- Some dashboards may use legacy tables or raw SQL that bypass DBT
+- String-matching introduces false positives/negatives
+- Does not account for transitive dependencies between DBT models
 
 ---
 
 ### ✅ Summary
 
-You effectively created a **DBT-to-Looker lineage map**, using:
-- Static code parsing (LookML, DBT)
-- Metadata from Looker
-- Heuristic matching (`analytics.model_name`)
-- Exploded table mapping for many-to-many relationships
+This strategy provides a practical, explainable DBT → Looker lineage map by combining:
 
-This is a strong foundation for automated lineage, auditability, and collaboration between data engineering and BI teams.
+- LookML static analysis
+- Dashboard metadata
+- DBT model naming conventions
+- Redshift table resolution
+- Exploded lineage for full many-to-many joins
+
+Ideal for auditability, observability, and collaborative debugging across data teams.

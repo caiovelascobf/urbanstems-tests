@@ -1,32 +1,29 @@
 """
+Script: dashboards_to_redshift_lineage.py
+
 Description:
     This script joins two CSV files:
-      1. A dashboard metadata file (from Looker System Activity → Dashboards) which includes
-         dashboard titles and the `query_explore` used in each tile.
-      2. A parsed LookML views mapping file (output of script_01) that lists each view's
-         associated Redshift tables via either `sql_table_name` or `derived_table_sources`.
+      1. A dashboard metadata file from Looker's System Activity
+      2. The output of script_01 with view/explore + table lineage
 
     Outputs:
-      - A full joined CSV mapping dashboards → explores → views → Redshift tables.
-      - A second exploded version where redshift_tables are unflattened into individual rows.
+      - A full joined CSV mapping dashboards → explores → view_or_model → Redshift tables.
+      - A second exploded version where redshift_tables are one per row.
 
 Inputs:
-    - system__activity_dashboard_explores_models_2025-06-16T1959.csv
-    - script_01-looker_views_and_its_tables_mapping.csv
+    - raw/system__activity_dashboard_explores_models_2025-06-16T1959.csv
+    - script_01-extracting_looker_tables_from_views_and_models.csv
 
 Outputs:
     - script_02-dashboards_to_views_to_redshift.csv
     - script_02-dashboards_to_views_to_redshift_exploded.csv
-
-Usage:
-    Place the input CSVs in the same directory and run the script.
 """
 
 import pandas as pd
 
 # === INPUT FILES ===
-DASHBOARD_CSV = r"raw\system__activity_dashboard_explores_models_2025-06-16T1959.csv"
-VIEWS_CSV = "script_01-looker_views_and_its_tables_mapping.csv"
+DASHBOARD_CSV = r"raw/system__activity_dashboard_explores_models_2025-06-16T1959.csv"
+VIEWS_CSV = "script_01-extracting_looker_tables_from_views_and_models.csv"
 OUTPUT_CSV = "script_02-dashboards_to_views_to_redshift.csv"
 OUTPUT_EXPLODED = "script_02-dashboards_to_views_to_redshift_exploded.csv"
 
@@ -38,12 +35,12 @@ views = pd.read_csv(VIEWS_CSV)
 dashboards.columns = dashboards.columns.str.strip().str.lower().str.replace(" ", "_")
 views.columns = views.columns.str.strip().str.lower()
 
-# === JOIN ON QUERY_EXPLORE <-> VIEW_NAME ===
+# === JOIN ON QUERY_EXPLORE <-> view_or_model_name ===
 merged = dashboards.merge(
     views,
     how="left",
     left_on="query_explore",
-    right_on="view_name"
+    right_on="view_or_model_name"
 )
 
 # === BUILD redshift_tables COLUMN ===
@@ -58,8 +55,18 @@ def combine_sources(row):
 
 merged["redshift_tables"] = merged.apply(combine_sources, axis=1)
 
-# === DROP sql_table_name and derived_table_sources ===
-merged_clean = merged.drop(columns=["sql_table_name", "derived_table_sources"], errors="ignore")
+# === SELECT ONLY DESIRED COLUMNS ===
+final_cols = [
+    "dashboard_id_(user-defined_only)",
+    "dashboard_title",
+    "query_model",
+    "query_explore",
+    "lkml_file",
+    "view_or_model_name",
+    "redshift_tables"
+]
+
+merged_clean = merged[final_cols]
 
 # === EXPORT MAIN CSV ===
 merged_clean.to_csv(OUTPUT_CSV, index=False)
@@ -68,12 +75,10 @@ merged_clean.to_csv(OUTPUT_CSV, index=False)
 exploded = merged_clean.copy()
 exploded["redshift_tables"] = exploded["redshift_tables"].fillna("")
 
-# Split and explode
 exploded = exploded.assign(
     redshift_table=exploded["redshift_tables"].str.split(r",\s*")
 ).explode("redshift_table")
 
-# Drop original combined list column
 exploded = exploded.drop(columns=["redshift_tables"])
 
 # === EXPORT EXPLODED CSV ===
