@@ -3,7 +3,7 @@ Compare potential Redshift paths from one CSV with paths in the main audit CSV.
 
 Inputs:
 - raw\dbt_audit_not_accurate_dbt_models.csv (inaccurate DBT model paths)
-- raw\redshift_table_audit.csv (main table audit data)
+- raw\redshift_table_audit_2025_06_26.csv (main table audit data)
 
 Output:
 - script_04-merge_redshift_tables_with_dbt_accuracy.csv
@@ -20,7 +20,7 @@ import pandas as pd
 
 # File paths
 audit_issues_csv = r"raw\dbt_audit_not_accurate_dbt_models.csv"
-main_audit_csv = r"raw\redshift_table_audit.csv"
+main_audit_csv = r"raw\redshift_table_audit_2025_06_26.csv"
 output_csv = 'script_04-merge_redshift_tables_with_dbt_accuracy.csv'
 
 # Function to clean path: lowercased and trimmed (preserves internal whitespace)

@@ -2,11 +2,11 @@ r"""
 Compare two CSV files using only 'schema_name' and 'object_name', and merge selected columns from the old file if rows match.
 
 Inputs:
-- raw\redshift_objects_audit_google_sheet_2025_06_19.csv (old CSV)
-- raw\dbeaver_2025_06_19_redshift_objects_usage_audit.csv (new CSV)
+- raw\redshift_objects_audit_google_sheet_2025_06_26.csv (old CSV)
+- raw\dbeaver_2025_06_26_redshift_objects_usage_audit_180.csv (new CSV)
 
 Output:
-- script_03-new_redshit_objects_audit_google_sheet.csv
+- script_03-new_redshift_objects_audit_google_sheet.csv
 
 Comparison:
 - Use only ['schema_name', 'object_name'] to compare.
@@ -20,9 +20,9 @@ Comparison:
 import pandas as pd
 
 # File paths
-old_csv = r"raw\redshift_objects_audit_google_sheet_2025_06_19.csv"
-new_csv = r"raw\dbeaver_2025_06_19_redshift_objects_usage_audit.csv"
-output_csv = 'script_03-new_redshit_objects_audit_google_sheet.csv'
+old_csv = r"raw\redshift_objects_audit_google_sheet_2025_06_26.csv"
+new_csv = r"raw\dbeaver_2025_06_26_redshift_objects_usage_audit_180.csv"
+output_csv = 'script_03-new_redshift_objects_audit_google_sheet_180.csv'
 
 # Columns for comparison
 compare_cols = ['schema_name', 'object_name']

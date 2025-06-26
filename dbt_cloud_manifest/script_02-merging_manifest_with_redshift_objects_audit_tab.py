@@ -1,7 +1,7 @@
 import pandas as pd
 
 # Load Redshift audit file
-audit_file = r"raw\script_03-new_redshit_objects_audit_google_sheet.csv"
+audit_file = r"raw\script_03-new_redshift_objects_audit_google_sheet_180.csv"
 audit_df = pd.read_csv(audit_file)
 
 # Load dbt-managed models extracted from manifest
@@ -23,7 +23,7 @@ merged_df["is_managed_by_dbt"] = merged_df["_merge"] == "both"
 merged_df.drop(columns=["_merge", "database"], inplace=True, errors='ignore')
 
 # Save to a new CSV
-output_path = 'script_02-redshift_audit_with_dbt_flag.csv'
+output_path = 'script_02-redshift_audit_with_dbt_flag_180.csv'
 merged_df.to_csv(output_path, index=False)
 
 print(f"✅ Merged audit saved to: {output_path}")
