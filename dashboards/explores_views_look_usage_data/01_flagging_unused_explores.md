@@ -90,7 +90,7 @@ We first **combine 2A and 2B** into a single usage dataset. Then we do a **left 
 
 ### 🧬 Merge Logic:
 
-```text
+```
 Dataset 1 (defined explores)
     LEFT JOIN
 Combined usage data (from dashboards and Looks)
@@ -115,20 +115,21 @@ After merging and analyzing the datasets, we produce a file like:
 
 ### 🔍 Sample Output Table
 
-| lkml_file                          | model_name   | explore_name    | sql_table_names         | used_in_dashboard | used_in_look | is_used_in_either |
-|-----------------------------------|--------------|------------------|--------------------------|-------------------|--------------|-------------------|
-| sales.model.lkml                  | sales        | orders           | analytics.orders         | True              | False        | True              |
-| marketing.model.lkml              | marketing    | campaign_stats   | analytics.campaigns      | False             | True         | True              |
-| internal_debug.model.lkml         | debug        | test_explore     | dev.test_table           | False             | False        | False             |
-| shipping.model.lkml               | shipping     | deliveries       | analytics.shipments      | True              | True         | True              |
+| lkml_file                      | model_name   | explore_name        | sql_table_names         | used_in_dashboard | used_in_look | is_used_in_either | safe_to_deprecate_explore |
+|-------------------------------|--------------|----------------------|--------------------------|-------------------|--------------|-------------------|----------------------------|
+| sales.model.lkml              | sales        | orders               | analytics.orders         | True              | False        | True              | False                      |
+| marketing.model.lkml          | marketing    | campaign_stats       | analytics.campaigns      | False             | True         | True              | False                      |
+| internal_debug.model.lkml     | debug        | test_explore         | dev.test_table           | False             | False        | False             | True                       |
+| shipping.model.lkml           | shipping     | deliveries           | analytics.shipments      | True              | True         | True              | False                      |
 
 ### ✅ What the flags mean:
 
-| Column              | Meaning                                                                 |
-|---------------------|-------------------------------------------------------------------------|
-| `used_in_dashboard` | `True` if the explore appears in **any dashboard tile**                 |
-| `used_in_look`      | `True` if the explore is used in a **saved Look**                       |
-| `is_used_in_either` | `True` if the explore is used **anywhere**; `False` = deprecation candidate |
+| Column                      | Meaning                                                                 |
+|-----------------------------|-------------------------------------------------------------------------|
+| `used_in_dashboard`         | `True` if the explore appears in **any dashboard tile**                 |
+| `used_in_look`              | `True` if the explore is used in a **saved Look**                       |
+| `is_used_in_either`         | `True` if the explore is used **anywhere**                              |
+| `safe_to_deprecate_explore` | `True` if the explore has **no usage** in dashboards or Looks — a cleanup candidate |
 
 ---
 
@@ -141,11 +142,11 @@ You may notice the final audit includes **more explores** than you found in your
 
 This is expected. Here’s why:
 
-| Reason | Explanation |
-|--------|-------------|
-| 🕰️ Legacy references | Dashboards or Looks may reference explores that were **removed from code** but still exist in usage metadata |
-| 📦 Other LookML projects | System Activity reports usage across all projects; your code scan may only include one |
-| 🔄 Timing mismatch | Some explores may appear in usage but not yet merged into your local `looker-master` |
+| Reason                   | Explanation                                                                 |
+|--------------------------|-----------------------------------------------------------------------------|
+| 🕰️ Legacy references     | Dashboards or Looks may reference explores that were **removed from code** |
+| 📦 Other LookML projects | System Activity reports usage across all projects                          |
+| 🔄 Timing mismatch       | Some explores may appear in usage but not yet merged into your local code   |
 
 These “extra” explores should be validated using the **Content Validator**, as they may break dashboards or require cleanup.
 

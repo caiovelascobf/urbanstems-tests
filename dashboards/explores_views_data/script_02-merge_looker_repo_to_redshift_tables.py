@@ -1,6 +1,4 @@
 """
-Script: dashboards_to_redshift_lineage.py
-
 Description:
     This script joins two CSV files:
       1. A dashboard metadata file from Looker's System Activity

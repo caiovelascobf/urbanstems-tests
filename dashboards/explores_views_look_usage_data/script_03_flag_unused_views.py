@@ -7,15 +7,15 @@ Description:
         - Views from .view.lkml files
         - Explores from .model.lkml files with their referenced views
 
-    The result is a list of views with a flag indicating whether they are used,
-    and if so, which explores reference them.
+    The result is a list of views with flags:
+        - Whether the view is used in any explore
+        - Whether it is safe to deprecate
 
 Input:
     - script_01-extracting_looker_tables_from_views_and_models.csv
 
 Output:
     - script_03-flag_unused_views.csv
-
 """
 
 import csv
@@ -28,6 +28,7 @@ OUTPUT_CSV = "script_03-flag_unused_views.csv"
 # === Containers ===
 defined_views = []  # All views parsed from view files
 explore_view_usage = defaultdict(set)  # view_name → set of explore_names that reference it
+all_explore_sql_tables = set()  # Tracks all sql_table_names and derived sources from explores
 
 # === Parse input CSV ===
 with open(INPUT_CSV, mode="r", encoding="utf-8") as infile:
@@ -37,27 +38,26 @@ with open(INPUT_CSV, mode="r", encoding="utf-8") as infile:
         view_or_model_name = row["view_or_model_name"]
         model_name = row["model_name"] or ""
         derived_sources = row["derived_table_sources"]
+        sql_table_name = row.get("sql_table_name", "")
 
         if file_path.lower().endswith(".view.lkml"):
             # This is a view definition
             defined_views.append({
                 "view_name": view_or_model_name,
                 "lkml_file": file_path,
-                "sql_table_names": row["sql_table_name"],
+                "sql_table_names": sql_table_name,
                 "derived_table_sources": derived_sources
             })
 
         elif file_path.lower().endswith(".model.lkml"):
-            # This is an explore — extract view usage
+            # This is an explore — extract view usage and table lineage
             explore_name = view_or_model_name
-            # Get base view and joined views from derived_table_sources as a proxy
             all_views = set()
 
-            # Base view (assume same as explore name if view_name not overridden)
-            base_view = explore_name
-            all_views.add(base_view)
+            # Base view (same as explore name by default)
+            all_views.add(explore_name)
 
-            # Join-derived views (from sql_table_names/derived_table_sources)
+            # Join-derived views
             joined_views_raw = derived_sources.split(",") if derived_sources else []
             for ref in joined_views_raw:
                 parts = ref.strip().split(".")
@@ -66,7 +66,15 @@ with open(INPUT_CSV, mode="r", encoding="utf-8") as infile:
                     if joined_view:
                         all_views.add(joined_view)
 
-            # Map each view to this explore
+                # Also store full derived ref (e.g., schema.table)
+                if ref.strip():
+                    all_explore_sql_tables.add(ref.strip())
+
+            # Also include direct sql_table_name
+            if sql_table_name and sql_table_name.strip():
+                all_explore_sql_tables.add(sql_table_name.strip())
+
+            # Map explore → view usage
             for view in all_views:
                 explore_view_usage[view].add(explore_name)
 
@@ -74,8 +82,17 @@ with open(INPUT_CSV, mode="r", encoding="utf-8") as infile:
 results = []
 for view in defined_views:
     name = view["view_name"]
-    used_in_explore = name in explore_view_usage
-    used_by = sorted(explore_view_usage[name]) if used_in_explore else []
+
+    view_sql_tables = set()
+    if view["sql_table_names"]:
+        view_sql_tables.add(view["sql_table_names"].strip())
+    if view["derived_table_sources"]:
+        derived_split = [s.strip() for s in view["derived_table_sources"].split(",") if s.strip()]
+        view_sql_tables.update(derived_split)
+
+    is_referenced_by_table = any(table in all_explore_sql_tables for table in view_sql_tables)
+    used_in_explore = (name in explore_view_usage) or is_referenced_by_table
+    used_by = sorted(explore_view_usage[name]) if name in explore_view_usage else []
 
     results.append({
         "view_name": name,
@@ -83,13 +100,20 @@ for view in defined_views:
         "used_in_explore": used_in_explore,
         "used_by_explores": ", ".join(used_by),
         "sql_table_names": view["sql_table_names"],
-        "derived_table_sources": view["derived_table_sources"]
+        "derived_table_sources": view["derived_table_sources"],
+        "safe_to_deprecate_view": not used_in_explore
     })
 
 # === Write output ===
 with open(OUTPUT_CSV, mode="w", newline="", encoding="utf-8") as outfile:
     writer = csv.DictWriter(outfile, fieldnames=[
-        "view_name", "lkml_file", "used_in_explore", "used_by_explores", "sql_table_names", "derived_table_sources"
+        "view_name",
+        "lkml_file",
+        "used_in_explore",
+        "used_by_explores",
+        "sql_table_names",
+        "derived_table_sources",
+        "safe_to_deprecate_view"
     ])
     writer.writeheader()
     writer.writerows(results)

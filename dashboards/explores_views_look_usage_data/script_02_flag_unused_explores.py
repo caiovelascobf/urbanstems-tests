@@ -1,7 +1,7 @@
 """
 Description:
     This script merges three datasets to identify Looker explores that are defined
-    in the LookML repo but are not used in any dashboard or saved Look (which are datasets extracted from Looker > Explore > System Activity > Dashboard + Look).
+    in the LookML repo but are not used in any dashboard or saved Look.
 
     It flags each explore with:
         - Whether it is referenced by any dashboard tile
@@ -15,7 +15,6 @@ Inputs:
 
 Output:
     - script_02-flag_unused_explores.csv
-
 """
 
 import pandas as pd
@@ -44,29 +43,31 @@ usage_df = pd.concat([
     look_df[["model_name", "explore_name", "source"]]
 ], ignore_index=True).drop_duplicates()
 
-# === Merge with explore list ===
+# === Join usage onto explore definitions ===
 merged = explores_df.merge(usage_df, on=["model_name", "explore_name"], how="left")
 
-# === Flag usage ===
-merged["used_in_dashboard"] = merged["source"] == "dashboard"
-merged["used_in_look"] = merged["source"] == "look"
-merged["is_used_in_either"] = merged["source"].notna()
+# === Aggregate flags per explore ===
+agg_flags = merged.groupby(
+    ["lkml_file", "model_name", "explore_name"]
+).agg(
+    used_in_dashboard=("source", lambda x: "dashboard" in x.dropna().tolist()),
+    used_in_look=("source", lambda x: "look" in x.dropna().tolist())
+).reset_index()
 
-# === Final columns ===
-output = merged[[
-    "lkml_file",
-    "model_name",
-    "explore_name",
-    "sql_table_names",
-    "derived_table_sources",
-    "used_in_dashboard",
-    "used_in_look",
-    "is_used_in_either"
-]]
+agg_flags["is_used_in_either"] = agg_flags["used_in_dashboard"] | agg_flags["used_in_look"]
+agg_flags["safe_to_deprecate_explore"] = ~agg_flags["is_used_in_either"]
+
+# === Bring back other fields like sql_table_names and derived_table_sources ===
+metadata_cols = explores_df.drop_duplicates(subset=["lkml_file", "model_name", "explore_name"])[
+    ["lkml_file", "model_name", "explore_name", "sql_table_names", "derived_table_sources"]
+]
+
+final_df = agg_flags.merge(metadata_cols, on=["lkml_file", "model_name", "explore_name"], how="left")
 
 # === Save output ===
-output.to_csv(output_csv, index=False)
+final_df.to_csv(output_csv, index=False)
 
-print(f"✅ Explore deprecation matrix saved to: {output_csv}")
-print(f"🔍 Total explores analyzed: {len(output)}")
-print(f"🚫 Unused explores: {len(output[output['is_used_in_either'] == False])}")
+# === Summary ===
+print(f"\n✅ Explore deprecation matrix saved to: {output_csv}")
+print(f"🔍 Total explores analyzed: {len(final_df)}")
+print(f"🚫 Unused explores: {final_df['safe_to_deprecate_explore'].sum()}")
