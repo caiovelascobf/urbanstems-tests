@@ -4,16 +4,17 @@ Description:
         - dashboard_id
         - dashboard_title
         - explore_name
-        - view_name
+        - base_view (i.e., the primary view that powers the explore)
         - model_name
 
-    It uses the dashboard lineage file that links dashboards to LookML explores and views.
+    It uses the dashboard lineage file produced in script_02, which links dashboards
+    to LookML explores and their resolved base views.
+
     Some dashboards may appear multiple times — this happens when a dashboard contains
     multiple tiles pointing to different explores/views.
 
-    This version filters out entries with missing explore_name to exclude dashboard tiles
-    that do not directly reference a LookML explore (e.g., text tiles, broken links, or
-    legacy content without lineage).
+    This version excludes entries with missing explore_name or base_view to filter out
+    non-LookML dashboard tiles (e.g., text tiles, broken links, or legacy content).
 
 Input:
     - script_02-dashboards_to_views_to_redshift.csv
@@ -46,20 +47,25 @@ dash_df.rename(columns={
     "dashboard_id_user_defined_only": "dashboard_id",
     "query_model": "model_name",
     "query_explore": "explore_name",
-    "view_or_model_name": "view_name"
+    "base_view_name": "base_view"  # ✅ renamed for clarity
 }, inplace=True)
 
-# === FILTER OUT ROWS WITH NO EXPLORE ===
-dash_df = dash_df[dash_df["explore_name"].notna()]
+# === FILTER OUT ROWS WITH MISSING EXPLORE OR BASE_VIEW ===
+dash_df = dash_df[
+    dash_df["explore_name"].notna() &
+    dash_df["base_view"].notna() &
+    (dash_df["explore_name"].astype(str).str.strip() != "") &
+    (dash_df["base_view"].astype(str).str.strip() != "")
+]
 
 # === SELECT AND DEDUPE ===
 mapping_df = dash_df[[
-    "dashboard_id", "dashboard_title", "model_name", "explore_name", "view_name"
+    "dashboard_id", "dashboard_title", "model_name", "explore_name", "base_view"
 ]].drop_duplicates()
 
 # === EXPORT ===
 mapping_df.to_csv(OUTPUT_MAPPING, index=False)
 
-print(f"\n✅ Dashboard → Explore → View mapping saved to: {OUTPUT_MAPPING}")
+print(f"\n✅ Dashboard → Explore → Base View mapping saved to: {OUTPUT_MAPPING}")
 print(f"🔢 Unique dashboards: {mapping_df['dashboard_id'].nunique()}")
 print(f"🔗 Total dashboard-explore-view combinations: {len(mapping_df)}")

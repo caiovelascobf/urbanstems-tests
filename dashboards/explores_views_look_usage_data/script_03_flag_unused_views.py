@@ -3,41 +3,39 @@ Description:
     This script identifies unused Looker views by analyzing which views
     are defined in .view.lkml files but never referenced in any explore.
 
-    It uses the output from script_01, which scans the looker-master repo
-    and contains both view definitions and explore-view relationships.
+    Enhancements:
+        - Uses view_or_model_type == "view" to identify defined views
+        - Uses base_view_name to identify actual view references from explores
+        - Maintains detection of derived_table_sources as indirect view references
 
-    It flags each view with:
-        - Whether it is referenced in any explore
-        - Whether it is safe to deprecate
+    Input:
+        - script_01-extracting_looker_tables_from_views_and_models.csv
 
-Input:
-    - script_01-extracting_looker_tables_from_views_and_models.csv
-
-Output:
-    - script_03-flag_unused_views.csv
+    Output:
+        - script_03-flag_unused_views.csv
 """
 
 import csv
-from collections import defaultdict
 
 # === File paths ===
 INPUT_CSV = r"C:\jobs_repo\brainforge\urbanstems-tests\dashboards\explores_views_repo\script_01-extracting_looker_tables_from_views_and_models.csv"
 OUTPUT_CSV = "script_03-flag_unused_views.csv"
 
 # === Containers ===
-defined_views = []  # Views defined in .view.lkml files
-referenced_views = set()  # All views referenced by explores
+defined_views = []        # Views defined in LookML
+referenced_views = set()  # Views referenced by explores
 
 # === Parse input CSV ===
 with open(INPUT_CSV, mode="r", encoding="utf-8") as infile:
     reader = csv.DictReader(infile)
     for row in reader:
-        file_path = row["lkml_file"]
+        item_type = row.get("view_or_model_type", "").strip().lower()
         item_name = row["view_or_model_name"]
-        derived_sources = row["derived_table_sources"]
-        sql_table = row["sql_table_name"]
+        file_path = row["lkml_file"]
+        sql_table = row.get("sql_table_name", "")
+        derived_sources = row.get("derived_table_sources", "")
 
-        if file_path.lower().endswith(".view.lkml"):
+        if item_type == "view":
             defined_views.append({
                 "view_name": item_name,
                 "lkml_file": file_path,
@@ -45,9 +43,12 @@ with open(INPUT_CSV, mode="r", encoding="utf-8") as infile:
                 "derived_table_sources": derived_sources
             })
 
-        elif file_path.lower().endswith(".model.lkml"):
-            explore_name = item_name
-            referenced_views.add(explore_name)  # base view
+        elif item_type == "explore":
+            base_view = row.get("base_view_name", "").strip()
+            if base_view:
+                referenced_views.add(base_view)
+
+            # Add any derived views referenced by this explore
             if derived_sources:
                 for ref in derived_sources.split(","):
                     parts = ref.strip().split(".")
@@ -65,7 +66,7 @@ for view in defined_views:
         "safe_to_deprecate_view": not is_used
     })
 
-# === Write output ===
+# === Write output CSV ===
 with open(OUTPUT_CSV, mode="w", newline="", encoding="utf-8") as outfile:
     writer = csv.DictWriter(outfile, fieldnames=[
         "view_name",
