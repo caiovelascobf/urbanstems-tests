@@ -37,34 +37,43 @@ look_df.rename(columns={"Query Explore": "explore_name", "Query Model": "model_n
 dash_df["source"] = "dashboard"
 look_df["source"] = "look"
 
-# === Combine usage logs ===
+# === Combine and aggregate usage flags ===
 usage_df = pd.concat([
     dash_df[["model_name", "explore_name", "source"]],
     look_df[["model_name", "explore_name", "source"]]
 ], ignore_index=True).drop_duplicates()
 
-# === Join usage onto explore definitions ===
-merged = explores_df.merge(usage_df, on=["model_name", "explore_name"], how="left")
+# Group by explore and flag usage
+usage_flags = (
+    usage_df
+    .assign(
+        used_in_dashboard=lambda df: df["source"] == "dashboard",
+        used_in_look=lambda df: df["source"] == "look"
+    )
+    .groupby(["model_name", "explore_name"])
+    .agg({
+        "used_in_dashboard": "any",
+        "used_in_look": "any"
+    })
+    .reset_index()
+)
 
-# === Aggregate flags per explore ===
-agg_flags = merged.groupby(
-    ["lkml_file", "model_name", "explore_name"]
-).agg(
-    used_in_dashboard=("source", lambda x: "dashboard" in x.dropna().tolist()),
-    used_in_look=("source", lambda x: "look" in x.dropna().tolist())
-).reset_index()
+usage_flags["is_used_in_either"] = usage_flags["used_in_dashboard"] | usage_flags["used_in_look"]
+usage_flags["safe_to_deprecate_explore"] = ~usage_flags["is_used_in_either"]
 
-agg_flags["is_used_in_either"] = agg_flags["used_in_dashboard"] | agg_flags["used_in_look"]
-agg_flags["safe_to_deprecate_explore"] = ~agg_flags["is_used_in_either"]
+# === Merge with full explore metadata ===
+final_df = explores_df.merge(
+    usage_flags,
+    on=["model_name", "explore_name"],
+    how="left"
+).fillna({
+    "used_in_dashboard": False,
+    "used_in_look": False,
+    "is_used_in_either": False,
+    "safe_to_deprecate_explore": True
+})
 
-# === Bring back other fields like sql_table_names and derived_table_sources ===
-metadata_cols = explores_df.drop_duplicates(subset=["lkml_file", "model_name", "explore_name"])[
-    ["lkml_file", "model_name", "explore_name", "sql_table_names", "derived_table_sources"]
-]
-
-final_df = agg_flags.merge(metadata_cols, on=["lkml_file", "model_name", "explore_name"], how="left")
-
-# === Save output ===
+# === Save final result ===
 final_df.to_csv(output_csv, index=False)
 
 # === Summary ===
