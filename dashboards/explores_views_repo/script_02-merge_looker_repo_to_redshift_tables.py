@@ -4,9 +4,13 @@ Description:
       1. A dashboard metadata file from Looker's System Activity
       2. The output of script_01 with view/explore + table lineage
 
+    Enhancements in this version:
+      - Filters out view-only rows from script_01 (uses only explores)
+      - Adds the resolved base_view_name to the output for improved traceability
+
     Outputs:
-      - A full joined CSV mapping dashboards → explores → view_or_model → Redshift tables.
-      - A second exploded version where redshift_tables are one per row.
+      - A full joined CSV mapping dashboards → explores → base views → Redshift tables
+      - A second exploded version where redshift_tables are one per row
 
 Inputs:
     - raw/system__activity_dashboard_explores_models_2025-06-16T1959.csv
@@ -30,8 +34,18 @@ dashboards = pd.read_csv(DASHBOARD_CSV)
 views = pd.read_csv(VIEWS_CSV)
 
 # === CLEAN COLUMN NAMES ===
-dashboards.columns = dashboards.columns.str.strip().str.lower().str.replace(" ", "_")
+dashboards.columns = (
+    dashboards.columns.str.strip()
+    .str.lower()
+    .str.replace(" ", "_")
+    .str.replace("(", "")
+    .str.replace(")", "")
+    .str.replace("-", "_")
+)
 views.columns = views.columns.str.strip().str.lower()
+
+# === FILTER TO EXPLORE ROWS ONLY ===
+views = views[views["view_or_model_type"] == "explore"]
 
 # === JOIN ON QUERY_EXPLORE <-> view_or_model_name ===
 merged = dashboards.merge(
@@ -53,14 +67,15 @@ def combine_sources(row):
 
 merged["redshift_tables"] = merged.apply(combine_sources, axis=1)
 
-# === SELECT ONLY DESIRED COLUMNS ===
+# === SELECT FINAL COLUMNS ===
 final_cols = [
-    "dashboard_id_(user-defined_only)",
+    "dashboard_id_user_defined_only",
     "dashboard_title",
     "query_model",
     "query_explore",
     "lkml_file",
     "view_or_model_name",
+    "base_view_name",  # New field from script_01
     "redshift_tables"
 ]
 

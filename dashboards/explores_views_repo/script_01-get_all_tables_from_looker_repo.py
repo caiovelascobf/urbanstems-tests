@@ -4,12 +4,19 @@ Description:
         - View definitions and their associated Redshift tables
         - Explore definitions (from model files), along with referenced views and their resolved tables
 
+    Enhancements in this version:
+        - Accurately detects and stores `base_view_name` for each explore (from `view_name:` if present)
+        - Does not assume that explore name equals base view name
+        - Classifies each entry as either a 'view' or an 'explore' using a new column: `view_or_model_type`
+
     Output columns:
-        - lkml_file
-        - view_or_model_name
-        - model_name
-        - sql_table_name
-        - derived_table_sources
+        - view_or_model_type        ("view" or "explore")
+        - view_or_model_name        (view name or explore name)
+        - model_name                (model file name for explores, None for views)
+        - base_view_name            (only for explores, if defined via view_name:)
+        - lkml_file                 (relative path to the .lkml file)
+        - sql_table_name            (direct table, if defined)
+        - derived_table_sources     (resolved from derived table SQL if any)
 
 Dependencies:
     pip install sqlparse
@@ -21,7 +28,7 @@ import csv
 import sqlparse
 
 # === CONFIGURATION ===
-LOOKML_ROOT = r"C:\jobs_repo\brainforge\urbanstems-tests\dashboards\explores_views_data\looker-master"
+LOOKML_ROOT = r"C:\jobs_repo\brainforge\urbanstems-tests\dashboards\explores_views_repo\looker-master"
 OUTPUT_CSV = "script_01-extracting_looker_tables_from_views_and_models.csv"
 
 # === REGEX PATTERNS ===
@@ -86,20 +93,22 @@ for root, _, files in os.walk(LOOKML_ROOT):
                         "lkml_file": rel_path
                     }
 
-# === PASS 2: Combine View and Explore Results ===
+# === COLLECT RESULTS ===
 results = []
 
-# First, write the view rows directly
+# — VIEWS —
 for view_name, meta in view_metadata.items():
     results.append({
-        "lkml_file": meta["lkml_file"],
+        "view_or_model_type": "view",
         "view_or_model_name": view_name,
         "model_name": None,
+        "base_view_name": None,
+        "lkml_file": meta["lkml_file"],
         "sql_table_name": meta["sql_table_name"],
         "derived_table_sources": meta["derived_table_sources"]
     })
 
-# Now, scan again for explore definitions and map their views
+# — EXPLORES —
 for root, _, files in os.walk(LOOKML_ROOT):
     for file in files:
         if file.lower().endswith(".model.lkml"):
@@ -112,13 +121,12 @@ for root, _, files in os.walk(LOOKML_ROOT):
                 for explore_match in explore_pattern.finditer(content):
                     explore_name = explore_match.group(1)
 
-                    # Find views in this explore block
                     block_start = explore_match.start()
                     block_end = content.find("explore:", block_start + 1)
                     explore_block = content[block_start:block_end] if block_end != -1 else content[block_start:]
 
                     base_view = view_name_override_pattern.search(explore_block)
-                    base_view_name = base_view.group(1) if base_view else explore_name
+                    base_view_name = base_view.group(1) if base_view else None
 
                     joined_views = set()
                     for join_match in join_view_pattern.finditer(explore_block):
@@ -128,9 +136,10 @@ for root, _, files in os.walk(LOOKML_ROOT):
                         joined_view = from_match.group(1) if from_match else join_name
                         joined_views.add(joined_view)
 
-                    all_views = set([base_view_name]) | joined_views
+                    all_views = set(joined_views)
+                    if base_view_name:
+                        all_views.add(base_view_name)
 
-                    # Aggregate all Redshift tables from those views
                     sql_tables = set()
                     derived_sources = set()
                     for view in all_views:
@@ -141,9 +150,11 @@ for root, _, files in os.walk(LOOKML_ROOT):
                                 derived_sources.update(view_metadata[view]["derived_table_sources"].split(","))
 
                     results.append({
-                        "lkml_file": rel_path,
+                        "view_or_model_type": "explore",
                         "view_or_model_name": explore_name,
                         "model_name": model_name,
+                        "base_view_name": base_view_name,
+                        "lkml_file": rel_path,
                         "sql_table_name": ", ".join(sorted(sql_tables)) if sql_tables else None,
                         "derived_table_sources": ", ".join(sorted(set(ds.strip() for ds in derived_sources if ds.strip())))
                     })
@@ -151,11 +162,11 @@ for root, _, files in os.walk(LOOKML_ROOT):
 # === WRITE TO CSV ===
 with open(OUTPUT_CSV, mode="w", newline="", encoding="utf-8") as f:
     writer = csv.DictWriter(f, fieldnames=[
-        "lkml_file", "view_or_model_name", "model_name", "sql_table_name", "derived_table_sources"
+        "view_or_model_type", "view_or_model_name", "model_name", "base_view_name",
+        "lkml_file", "sql_table_name", "derived_table_sources"
     ])
     writer.writeheader()
     writer.writerows(results)
 
-# === SUMMARY ===
 print(f"\n✅ LookML mapping saved to: {OUTPUT_CSV}")
 print(f"📄 Total entries parsed (views + explores): {len(results)}")
