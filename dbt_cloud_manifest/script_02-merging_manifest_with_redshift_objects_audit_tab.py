@@ -4,9 +4,13 @@ import pandas as pd
 audit_file = r"raw\script_03-new_redshift_objects_audit_google_sheet_180.csv"
 audit_df = pd.read_csv(audit_file)
 
-# Load dbt-managed models extracted from manifest
-dbt_file = 'script_01-dbt_models_from_manifest.csv'
+# Load DBT-managed models and sources extracted from manifest
+dbt_file = 'script_01-dbt_models_and_sources_from_manifest.csv'
 dbt_df = pd.read_csv(dbt_file)
+
+# Normalize audit columns to lowercase for matching
+audit_df["schema_name"] = audit_df["schema_name"].str.lower()
+audit_df["object_name"] = audit_df["object_name"].str.lower()
 
 # Merge on schema_name and object_name
 merged_df = audit_df.merge(
@@ -16,16 +20,18 @@ merged_df = audit_df.merge(
     indicator=True
 )
 
-# Add a new flag: whether object is managed by dbt
-merged_df["is_managed_by_dbt"] = merged_df["_merge"] == "both"
+# Add a Y/N flag for DBT-managed status
+merged_df["Is in manifest.json"] = merged_df["_merge"].apply(lambda x: "Y" if x == "both" else "N")
 
-# Drop the merge indicator and database (if you want to keep it clean)
+# Drop helper columns
 merged_df.drop(columns=["_merge", "database"], inplace=True, errors='ignore')
 
 # Save to a new CSV
 output_path = 'script_02-redshift_audit_with_dbt_flag_180.csv'
 merged_df.to_csv(output_path, index=False)
 
+# Summary output
 print(f"✅ Merged audit saved to: {output_path}")
 print(f"🔢 Total objects: {len(merged_df)}")
-print(f"🟢 Managed by dbt: {merged_df['is_managed_by_dbt'].sum()}")
+print(f"🟢 In manifest.json (Y): {(merged_df['Is in manifest.json'] == 'Y').sum()}")
+print(f"🔴 Not in manifest.json (N): {(merged_df['Is in manifest.json'] == 'N').sum()}")

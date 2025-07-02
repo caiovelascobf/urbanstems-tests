@@ -4,3 +4,4 @@ python-dotenv # Reads key-value pairs from a .env file and can set them as envir
 selenium # Automates web browser interaction from Python 
 pandas
 sqlparse
+looker_sdk
