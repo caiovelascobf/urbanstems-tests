@@ -1,61 +1,98 @@
 # 🧱 Looker View Deprecation Analysis — Step-by-Step Guide
 
-This guide explains how we identify **unused views** in Looker LookML files so they can be safely removed or flagged for cleanup. Views are foundational to Looker — they define the fields available in explores, tiles, and Looks.
+This guide explains how to identify **unused Looker views** in your LookML project, so they can be safely removed or deprecated. Views define the dimensions and measures that power dashboards, explores, and ad hoc queries — but unused views add complexity and technical debt.
 
-This step builds upon your previous explore usage audit by analyzing which views are still referenced in active explores.
+This analysis combines:
+- **Explore-based usage** from your LookML models
+- **Real-world query usage** from Looker’s System Activity logs
 
 ---
 
-## 🎓 Why This Step Makes Sense in the Deprecation Workflow
+## 🎯 Why This Matters in the Deprecation Workflow
 
-In Looker, **views are building blocks**. They define the SQL fields (dimensions, measures, filters) that power queries. But views **can’t be used directly** by dashboards or Looks — they must first be included in an **explore**.
+In Looker:
+- **Views** are data blueprints
+- **Explores** are user entry points
+- **Dashboards/Looks** rely on explores, which in turn reference views
 
 That means:
-- If a view **is not referenced in any explore**, it is effectively **disconnected from the user interface**
-- Users **cannot access its fields**, unless:
-  - It’s indirectly used in Liquid includes or LookML dashboards (edge cases)
-- So such views are **dead weight** in your model, increasing maintenance cost, confusion, and validator errors
+- If a view is **not referenced by any explore**, and
+- **Not used in any actual query** (SQL Runner, dev explores, dashboard filters)...
 
-> ✅ By removing unused views, you:
-> - Clean up technical debt
-> - Make your model more readable
-> - Reduce risk of errors due to legacy logic
-> - Speed up model rebuilds and parser performance
+👉 It is **safe to deprecate**.
 
-This step makes the deprecation audit complete: you’ve audited **entry points (explores)**, and now you’re auditing **field providers (views)**.
+> ✅ Deprecating unused views will:
+> - Remove technical clutter
+> - Prevent confusion and misused fields
+> - Improve model performance and validation times
+> - Reduce maintenance cost
 
 ---
 
-## ✅ Step 1: Extract All Views from LookML
+## ✅ Step 1: Extract View and Explore Metadata
 
-**📁 Source File:** `script_01-extracting_looker_tables_from_views_and_models.csv`  
-This file includes rows for both:
-- `.view.lkml` files → defined views  
-- `.model.lkml` files → defined explores with references to views  
+**📄 Source File:** `script_01-extracting_looker_tables_from_views_and_models.csv`
 
-> You already created this in `script_01`, so no additional System Activity or Looker exports are needed.
+This file is generated from `.view.lkml` and `.model.lkml` files, and includes:
+- View names and file paths
+- Explore names and their referenced views
+- SQL table names and derived table sources (used for indirect references)
+
+> ⚙️ You already created this using `script_01`, which parses your LookML project recursively.
 
 ---
 
-## ✅ Step 2: Analyze View Usage from Explores
+## ✅ Step 2: Gather System Activity (Real Query Usage)
 
-**📁 Script:** `script_03-flag_unused_views.py`  
-**📁 Output:** `script_03-flag_unused_views.csv`
+**📄 Source File:** `system__activity_history_YYYY-MM-DD.csv`  
+Exported from **System Activity → History** in Looker.
 
-This script:
-- Separates **all defined views** from the input file
-- Extracts **all views used in explores** (via `view_name:` or `join:` clauses)
-- Flags which views are **not used in any explore**
+This file includes:
+- `Query Fields Used`: actual fields used in any Looker query
+- `Query Created Date`: when the query was run
+- Used to detect views even if they're **not modeled in explores**
 
-### ⚙️ Logic Overview:
+> This step helps catch edge cases like:
+> - SQL Runner queries
+> - Dev-mode explores
+> - Scheduled content based on legacy views
+
+---
+
+## ✅ Step 3: Flag Unused Views
+
+**📜 Script:** `script_03-flag_unused_views.py`  
+**📄 Output:** `script_03-flag_unused_views.csv`
+
+This script combines both input files and produces a comprehensive view usage audit.
+
+### 🧠 Key Fields in the Output:
+
+| Column | Description |
+|--------|-------------|
+| `view_name` | Name of the LookML view |
+| `lkml_file` | Path to the `.view.lkml` file |
+| `used_in_explore` | `True` if referenced in a model explore (`base_view_name`, joins, or derived sources) |
+| `used_in_system_activity` | `True` if queried in actual Looker queries (SQL Runner, dev explore, dashboard filters) |
+| `last_used_in_system_activity` | Most recent date the view was queried (empty if never) |
+| `safe_to_deprecate_view` | `True` if the view is unused in both explores and system activity |
+
+---
+
+## ⚙️ Logic Summary
+
 ```text
-1. From the CSV, extract all view names defined in .view.lkml files
-2. From explores, extract all views that are:
-    - Base views (defined via `view_name:` or defaulted to the explore name)
-    - Joined views (via `join:` and optional `from:`)
-3. Compare both sets to identify unused views
-4. Output a CSV with:
-    - All defined views
-    - Views used in explores
-    - Flags for unused views
-```
+1. Load all views defined in .view.lkml files
+2. Identify views referenced in:
+    a. base_view_name of explores
+    b. join/from clauses
+    c. derived_table_sources
+3. Load system activity query history
+    a. Parse view names from Query Fields Used
+    b. Track last-used date per view
+4. For each view:
+    - Mark used_in_explore
+    - Mark used_in_system_activity
+    - Derive last_used_in_system_activity
+    - If both are False → safe_to_deprecate_view = True
+5. Output all data to script_03-flag_unused_views.csv
