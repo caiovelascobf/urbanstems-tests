@@ -15,3 +15,4 @@ looker-master
 looker-master/
 looker-master/*
 manifest.json
+*.lkml
