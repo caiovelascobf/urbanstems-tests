@@ -1,3 +1,47 @@
+"""
+Description:
+    This script identifies unused Looker views by analyzing:
+
+        - View definitions collected from .view.lkml files
+        - View usage in explores (base_view_name)
+        - View usage in joins (join_view)
+        - Field-level references to other views (${other_view.field})
+        - Derived table SQL sources (e.g., postgres_agg.viewname)
+        - Live query usage from Looker System Activity exports
+
+    It produces a final report flagging which views are used or unused,
+    along with system activity timestamps for traceability.
+
+Key Features:
+    - Captures all possible reference types to a view from LookML content
+    - Tracks live usage based on the “Query Fields Used” from System Activity
+    - Adds `safe_to_deprecate_view` flag for views unused in both LookML and queries
+    - Uses deduplicated results from upstream `script_01` output
+
+Inputs:
+    - script_01-extracting_looker_tables_from_views_and_models.csv
+        (Generated from the full LookML scan)
+    - system__activity_history_*.csv
+        (System Activity export from Looker, including “Query Fields Used”)
+
+Output:
+    - script_03-flag_unused_views.csv
+        With the following columns:
+            - view_name
+            - lkml_file
+            - sql_table_names
+            - derived_table_sources
+            - used_in_explore
+            - used_in_system_activity
+            - last_used_in_system_activity
+            - safe_to_deprecate_view
+
+Usage:
+    - Ensure both input files are available and correctly referenced
+    - Run this script after `script_01` has been executed
+    - Review `safe_to_deprecate_view` column for cleanup decisions
+"""
+
 import csv
 import ast
 from datetime import datetime
@@ -8,48 +52,48 @@ SYSTEM_ACTIVITY_CSV = r"C:\jobs_repo\brainforge\urbanstems-tests\dashboards\expl
 OUTPUT_CSV = "script_03-flag_unused_views.csv"
 
 # === Containers ===
-defined_views = []                    # All defined views from view files
-referenced_views = set()             # Views referenced in explores, joins, derived_table, or ${view.field}
-system_activity_views = set()        # Views seen in live queries
-system_activity_last_used = {}       # View -> Most recent usage timestamp
+defined_views = []                    # All defined views from .view.lkml files
+referenced_views = set()             # Views referenced via explore, join_view, view_reference, or derived_table_sources
+system_activity_views = set()        # Views seen in real Looker queries
+system_activity_last_used = {}       # View name -> most recent usage date
 
 # === Parse script_01 output CSV ===
 with open(INPUT_CSV, mode="r", encoding="utf-8") as infile:
     reader = csv.DictReader(infile)
     for row in reader:
         item_type = row.get("view_or_model_type", "").strip().lower()
-        item_name = row["view_or_model_name"].strip()
+        view_name = row["view_or_model_name"].strip()
+        base_view = row.get("base_view_name", "").strip()
+        derived_sources = row.get("derived_table_sources", "")
         file_path = row["lkml_file"]
         sql_table = row.get("sql_table_name", "")
-        derived_sources = row.get("derived_table_sources", "")
 
+        # Track defined views
         if item_type == "view":
             defined_views.append({
-                "view_name": item_name,
+                "view_name": view_name,
                 "lkml_file": file_path,
                 "sql_table_names": sql_table,
                 "derived_table_sources": derived_sources
             })
 
-        # Reference logic: explores, joins, view_references
+        # Track referenced views from explores, joins, and view references
         if item_type in ("explore", "join_view", "view_reference"):
-            # From base_view_name if explore
-            base_view = row.get("base_view_name", "").strip()
             if base_view:
                 referenced_views.add(base_view)
+            if view_name:
+                referenced_views.add(view_name)
 
-            # Generic reference from the model or view name
-            ref_view = item_name
-            if ref_view:
-                referenced_views.add(ref_view)
-
-            # From derived_table_sources like postgres_agg.distributionpoints
-            if derived_sources:
-                for source in derived_sources.split(","):
-                    source = source.strip()
-                    if "." in source:
-                        view_part = source.split(".")[0]
-                        referenced_views.add(view_part)
+        # Track views referenced in derived_table_sources (corrected)
+        if derived_sources:
+            for source in derived_sources.split(","):
+                source = source.strip()
+                if "." in source:
+                    try:
+                        _, view_ref = source.split(".", 1)
+                        referenced_views.add(view_ref.strip())
+                    except ValueError:
+                        continue
 
 # === Parse System Activity CSV ===
 with open(SYSTEM_ACTIVITY_CSV, mode="r", encoding="utf-8") as usagefile:
@@ -76,17 +120,16 @@ with open(SYSTEM_ACTIVITY_CSV, mode="r", encoding="utf-8") as usagefile:
 # === Flag usage status ===
 results = []
 for view in defined_views:
-    view_name = view["view_name"]
-    is_used_in_explore = view_name in referenced_views
-    is_used_in_system = view_name in system_activity_views
-    is_used = is_used_in_explore or is_used_in_system
-
+    name = view["view_name"]
+    used_in_explore = name in referenced_views
+    used_in_system = name in system_activity_views
+    last_used = system_activity_last_used.get(name, "")
     results.append({
         **view,
-        "used_in_explore": is_used_in_explore,
-        "used_in_system_activity": is_used_in_system,
-        "last_used_in_system_activity": system_activity_last_used.get(view_name, "").strftime("%Y-%m-%d") if view_name in system_activity_last_used else "",
-        "safe_to_deprecate_view": not is_used
+        "used_in_explore": used_in_explore,
+        "used_in_system_activity": used_in_system,
+        "last_used_in_system_activity": last_used.strftime("%Y-%m-%d") if last_used else "",
+        "safe_to_deprecate_view": not (used_in_explore or used_in_system)
     })
 
 # === Write output CSV ===

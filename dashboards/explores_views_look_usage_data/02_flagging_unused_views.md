@@ -35,10 +35,12 @@ That means:
 
 This file is generated from `.view.lkml` and `.model.lkml` files, and includes:
 - View names and file paths
-- Explore names and their referenced views
-- SQL table names and derived table sources (used for indirect references)
+- Explore definitions, including `from:` references and base view overrides
+- Join view aliases and their resolved `from:` views
+- `${other_view.field}` field-level cross references
+- Derived table upstream sources parsed from `derived_table.sql`
 
-> ⚙️ You already created this using `script_01`, which parses your LookML project recursively.
+> ⚙️ You already created this using `script_01`, which parses your LookML project recursively and generates a fully deduplicated map of dependencies.
 
 ---
 
@@ -72,10 +74,12 @@ This script combines both input files and produces a comprehensive view usage au
 |--------|-------------|
 | `view_name` | Name of the LookML view |
 | `lkml_file` | Path to the `.view.lkml` file |
-| `used_in_explore` | `True` if referenced in a model explore (`base_view_name`, joins, or derived sources) |
-| `used_in_system_activity` | `True` if queried in actual Looker queries (SQL Runner, dev explore, dashboard filters) |
+| `sql_table_names` | Table name if the view uses `sql_table_name` |
+| `derived_table_sources` | Source tables used in `derived_table.sql`, if present |
+| `used_in_explore` | `True` if referenced in a model explore (via `from:`, `view_name:`, `join:`, `${view.field}`, or derived table SQL) |
+| `used_in_system_activity` | `True` if queried in actual Looker usage (System Activity) |
 | `last_used_in_system_activity` | Most recent date the view was queried (empty if never) |
-| `safe_to_deprecate_view` | `True` if the view is unused in both explores and system activity |
+| `safe_to_deprecate_view` | `True` if the view is unused in both LookML *and* live queries |
 
 ---
 
@@ -83,16 +87,20 @@ This script combines both input files and produces a comprehensive view usage au
 
 ```text
 1. Load all views defined in .view.lkml files
-2. Identify views referenced in:
-    a. base_view_name of explores
-    b. join/from clauses
-    c. derived_table_sources
-3. Load system activity query history
-    a. Parse view names from Query Fields Used
-    b. Track last-used date per view
+
+2. Identify view references in:
+    a. base_view_name of explores (via view_name: or from:)
+    b. join aliases resolved to view names (join: xyz { from: abc })
+    c. ${other_view.field} references across LookML files
+    d. derived_table.sql blocks that use FROM or JOIN view.table patterns
+
+3. Load query history from System Activity CSV:
+    a. Parse view names from "Query Fields Used"
+    b. Track most recent usage date per view
+
 4. For each view:
-    - Mark used_in_explore
-    - Mark used_in_system_activity
-    - Derive last_used_in_system_activity
+    - Flag used_in_explore based on step 2 references
+    - Flag used_in_system_activity based on step 3 query history
     - If both are False → safe_to_deprecate_view = True
-5. Output all data to script_03-flag_unused_views.csv
+
+5. Output the final audit to script_03-flag_unused_views.csv
