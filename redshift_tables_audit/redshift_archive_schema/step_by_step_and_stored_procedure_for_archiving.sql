@@ -75,7 +75,7 @@ DECLARE
     suffix INT;
     was_truncated BOOLEAN;
     row_counter INT := 0;
-    max_limit INT := 2300;  -- Adjust or remove for full run (each time you run, this will run the next "max_limit" after skipping the ones already there)
+    max_limit INT := 2400;  -- Adjust or remove for full run (each time you run, this will run the next "max_limit" after skipping the ones already there)
 BEGIN
     FOR r IN
         SELECT schema_name, table_name
