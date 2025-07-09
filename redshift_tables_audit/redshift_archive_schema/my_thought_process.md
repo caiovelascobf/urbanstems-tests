@@ -1,197 +1,277 @@
-# Redshift Table Archiving: Workflow Summary
+# 📦 Redshift Archiving System — Phase 1: BASE TABLES Only
 
-## 🗂️ Goal
+This document sets up and explains a robust, idempotent Redshift archival system. It is designed to copy **only `BASE TABLES`** (not views or other object types) from source schemas to an `archive_tables` schema.
 
-Deprecate and archive selected Redshift base tables by copying them from their original schemas into a single `archive` schema in the same database (`analytics`). Preserve data (not just metadata) and enable safe, resumable execution.
-
----
-
-## ✅ Step 1: Candidate List Preparation
-
-- A CSV named `archive_candidates.csv` was created with this format:
-
-```csv
-schema_name,table_name,object_type
-sales,orders,BASE TABLE
-support,orders,BASE TABLE
-hr,employees,BASE TABLE
-...
-```
-
-- The CSV was uploaded to an S3 bucket:
-  ```
-  s3://caio-archive-redshift-objects/archive_candidates.csv
-  ```
+> ⚠️ **IMPORTANT:**  
+> - This procedure currently **only handles `BASE TABLES`**.  
+> - **Views are excluded** by design (`object_type = 'BASE TABLE'` filter).  
+> - **Phase 2** will extend this logic to support archiving `VIEWS` separately.
 
 ---
 
-## ✅ Step 2: Load Candidates into Redshift
+## 🧠 Overview of the Workflow
 
-- A table was created to store the candidate list:
+1. A CSV file lists candidate tables for deprecation  
+2. Redshift loads the list into `archive_schemas.archive_candidates`  
+3. A stored procedure loops through the list:
+   - ✅ Copies `BASE TABLES` into `archive_tables`
+   - ✅ Skips any already archived
+   - ✅ Truncates and suffixes names to meet Redshift constraints
+   - ✅ Logs everything in a mapping table
+
+---
+
+## 📁 Step 1: Create the Input Schema
 
 ```sql
-CREATE TABLE archive.archive_candidates (
+CREATE SCHEMA IF NOT EXISTS analytics.archive_schemas;
+```
+
+✅ Confirm creation:
+
+```sql
+SELECT *
+FROM information_schema.schemata
+WHERE schema_name = 'archive_schemas';
+```
+
+---
+
+## 📄 Step 2: Upload Archive Candidates File
+
+Manually upload this CSV to S3:
+
+```
+s3://caio-archive-redshift-objects/archive_candidates.csv
+```
+
+Each row must define:
+- `schema_name`
+- `table_name`
+- `object_type` — Only `BASE TABLE` will be processed
+
+---
+
+## 📋 Step 3: Create and Load `archive_candidates` Table
+
+```sql
+CREATE TABLE archive_schemas.archive_candidates (
   schema_name VARCHAR,
   table_name VARCHAR,
-  object_type VARCHAR,
-  created_at TIMESTAMP DEFAULT current_timestamp
+  object_type VARCHAR,      -- 'BASE TABLE' or 'VIEW'
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
-- Data was loaded from S3:
+✅ Verify the table exists:
 
 ```sql
-COPY archive.archive_candidates(schema_name, table_name, object_type)
+SELECT *
+FROM information_schema.tables
+WHERE table_schema = 'archive_schemas' AND table_name = 'archive_candidates';
+```
+
+🚛 Load CSV contents:
+
+```sql
+COPY archive_schemas.archive_candidates(schema_name, table_name, object_type)
 FROM 's3://caio-archive-redshift-objects/archive_candidates.csv'
 IAM_ROLE 'arn:aws:iam::045322402851:role/redshift_s3_access'
 FORMAT AS CSV
 IGNOREHEADER 1;
 ```
 
----
-
-## ✅ Step 3: Create Archive Schema
+✅ Confirm load:
 
 ```sql
-CREATE SCHEMA IF NOT EXISTS archive;
+SELECT COUNT(*) 
+FROM archive_schemas.archive_candidates;
 ```
 
 ---
 
-## ✅ Step 4: Initial Test Procedure
-
-- A stored procedure was created to copy candidate tables from source schemas into the `archive` schema:
+## 🗃️ Step 4: Create Archive Output Schema
 
 ```sql
-CREATE OR REPLACE PROCEDURE archive.copy_base_tables_from_candidates()
-AS $$
-DECLARE
-    r RECORD;
-    stmt TEXT;
-    exists_count INT;
-BEGIN
-    FOR r IN
-        SELECT schema_name, table_name
-        FROM archive.archive_candidates
-        WHERE object_type = 'BASE TABLE'
-    LOOP
-        SELECT COUNT(*) INTO exists_count
-        FROM information_schema.tables
-        WHERE table_schema = 'archive'
-          AND table_name = r.table_name;
-
-        IF exists_count = 0 THEN
-            stmt := 'CREATE TABLE archive.' || r.table_name ||
-                    ' AS SELECT * FROM ' || r.schema_name || '.' || r.table_name || ';';
-
-            BEGIN
-                EXECUTE stmt;
-            EXCEPTION
-                WHEN OTHERS THEN
-                    RAISE NOTICE 'Failed to copy: %', stmt;
-            END;
-        ELSE
-            RAISE NOTICE 'Skipping table already archived: %', r.table_name;
-        END IF;
-    END LOOP;
-END;
-$$ LANGUAGE plpgsql;
+CREATE SCHEMA IF NOT EXISTS analytics.archive_tables;
 ```
 
-- This was tested successfully with small batches using `LIMIT`, but was later modified for full-run processing.
-
----
-
-## ⚠️ Issue Identified
-
-- Multiple source schemas had tables with the same name (e.g., `sales.orders`, `support.orders`).
-- Without name mangling, only one version could exist in `archive`, causing errors.
-
----
-
-## ✅ Step 5: Updated Procedure with Schema Prefixing
-
-To avoid table name collisions, the procedure was updated to include the source schema in the archive table name:
-
-- Example:  
-  `sales.orders` → `archive.sales__orders`  
-  `support.orders` → `archive.support__orders`
+✅ Confirm schema exists:
 
 ```sql
-CREATE OR REPLACE PROCEDURE archive.copy_base_tables_from_candidates()
-AS $$
-DECLARE
-    r RECORD;
-    stmt TEXT;
-    archive_table TEXT;
-    exists_count INT;
-BEGIN
-    FOR r IN
-        SELECT schema_name, table_name
-        FROM archive.archive_candidates
-        WHERE object_type = 'BASE TABLE'
-    LOOP
-        archive_table := r.schema_name || '__' || r.table_name;
-
-        SELECT COUNT(*) INTO exists_count
-        FROM information_schema.tables
-        WHERE table_schema = 'archive'
-          AND table_name = archive_table;
-
-        IF exists_count = 0 THEN
-            stmt := 'CREATE TABLE archive."' || archive_table || '" AS SELECT * FROM "' ||
-                    r.schema_name || '"."' || r.table_name || '";';
-
-            BEGIN
-                EXECUTE stmt;
-            EXCEPTION
-                WHEN OTHERS THEN
-                    RAISE NOTICE 'Failed to copy: %', stmt;
-            END;
-        ELSE
-            RAISE NOTICE 'Skipping table already archived: %', archive_table;
-        END IF;
-    END LOOP;
-END;
-$$ LANGUAGE plpgsql;
+SELECT *
+FROM information_schema.schemata
+WHERE schema_name = 'archive_tables';
 ```
 
-- The archive table names are now globally unique, traceable to their source schema, and safely handled.
-
----
-
-## 🔍 Monitoring Progress
-
-While the procedure runs, progress is checked by:
+🔎 View current contents:
 
 ```sql
-SELECT COUNT(*) FROM information_schema.tables
-WHERE table_schema = 'archive';
-```
-
-Or:
-
-```sql
-SELECT table_name
+SELECT *
 FROM information_schema.tables
-WHERE table_schema = 'archive'
-ORDER BY table_name;
+WHERE table_schema = 'archive_tables';
 ```
 
 ---
 
-## 🔄 What’s Next
+## 🔗 Step 5: Create Archive Mapping Table
 
-- Continue running the procedure to archive all `BASE TABLE` entries
-- Optionally:
-  - Add a `processed` flag to `archive_candidates`
-  - Add logging table (`archive.archive_log`) to record success/failure
-  - Add logic to handle `VIEW` objects similarly
+This table logs original → archived mappings:
+
+```sql
+CREATE TABLE IF NOT EXISTS archive_tables.archive_table_mapping (
+    original_schema_name TEXT,
+    original_table_name TEXT,
+    archive_table_name TEXT,
+    truncated BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+✅ Check mappings:
+
+```sql
+SELECT * FROM archive_tables.archive_table_mapping;
+```
 
 ---
 
-## ✅ Current Status
+## ⚙️ Step 6: Create the Archive Procedure
 
-- Archive schema and candidates pipeline set up
-- Tables are safely archived with schema-prefixed names
-- Procedure is working and ready to process all candidates in a single run
+The stored procedure below:
+- Iterates over candidate `BASE TABLES`
+- Ensures uniqueness in archive schema
+- Safely truncates long names (max 127 chars)
+- Skips duplicates
+- Records each success in a mapping table
+
+```sql
+CREATE OR REPLACE PROCEDURE archive_tables.copy_from_archive_candidates()
+AS $$
+DECLARE
+    r RECORD;
+    archive_table_name TEXT;
+    base_table_name TEXT;
+    source_table TEXT;
+    stmt VARCHAR(10000);  -- Allow long SQL statements
+    exists_count INT;
+    suffix INT;
+    was_truncated BOOLEAN;
+    row_counter INT := 0;
+    max_limit INT := 2300;  -- Prevent overloading in one run
+BEGIN
+    FOR r IN
+        SELECT schema_name, table_name
+        FROM archive_schemas.archive_candidates
+        WHERE object_type = 'BASE TABLE'  -- ✅ Only base tables are processed
+    LOOP
+        base_table_name := r.table_name;
+
+        -- Skip if already archived
+        IF EXISTS (
+            SELECT 1
+            FROM archive_tables.archive_table_mapping
+            WHERE original_table_name = base_table_name
+              AND original_schema_name = r.schema_name
+        ) THEN
+            CONTINUE;
+        END IF;
+
+        row_counter := row_counter + 1;
+        IF row_counter > max_limit THEN
+            RAISE NOTICE '⏸️ Limit of % reached, stopping batch.', max_limit;
+            RETURN;
+        END IF;
+
+        archive_table_name := base_table_name;
+        was_truncated := FALSE;
+
+        -- Truncate if too long
+        IF LENGTH(archive_table_name) > 127 THEN
+            archive_table_name := SUBSTRING(archive_table_name FROM 1 FOR 127);
+            was_truncated := TRUE;
+        END IF;
+
+        -- Ensure uniqueness
+        suffix := 1;
+        LOOP
+            SELECT COUNT(*) INTO exists_count
+            FROM information_schema.tables
+            WHERE table_schema = 'archive_tables'
+              AND table_name = archive_table_name;
+            EXIT WHEN exists_count = 0;
+
+            archive_table_name := LEFT(base_table_name, 120);
+            archive_table_name := archive_table_name || '_' || suffix;
+
+            IF LENGTH(archive_table_name) > 127 THEN
+                archive_table_name := SUBSTRING(archive_table_name FROM 1 FOR 127);
+            END IF;
+
+            was_truncated := TRUE;
+            suffix := suffix + 1;
+        END LOOP;
+
+        -- Build and execute copy
+        source_table := '"' || r.schema_name || '"."' || base_table_name || '"';
+        stmt := 'CREATE TABLE archive_tables."' || archive_table_name || '" AS SELECT * FROM ' || source_table || ';';
+
+        BEGIN
+            EXECUTE stmt;
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE NOTICE '❌ Failed to copy %.%: %', r.schema_name, base_table_name, SQLERRM;
+                CONTINUE;
+        END;
+
+        -- Log mapping
+        stmt := 'INSERT INTO archive_tables.archive_table_mapping (' ||
+                'original_schema_name, original_table_name, archive_table_name, truncated' ||
+                ') VALUES (''' ||
+                r.schema_name || ''', ''' ||
+                base_table_name || ''', ''' ||
+                archive_table_name || ''', ' ||
+                CASE WHEN was_truncated THEN 'true' ELSE 'false' END || ');';
+        EXECUTE stmt;
+    END LOOP;
+
+    RAISE NOTICE '🏁 Done. % tables processed (new archives only).', row_counter;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+---
+
+## ▶️ Step 7: Run the Procedure
+
+```sql
+CALL archive_tables.copy_from_archive_candidates();
+```
+
+You can run this repeatedly — it will only archive new `BASE TABLES` not yet mapped.
+
+---
+
+## 📊 Step 8: View Archived Mappings
+
+```sql
+SELECT * FROM archive_tables.archive_table_mapping;
+```
+
+---
+
+## ✅ Summary
+
+| Step | Purpose |
+|------|---------|
+| archive_candidates | Stores candidate `BASE TABLES` for deprecation |
+| archive_table_mapping | Tracks copies and final archive names |
+| `copy_from_archive_candidates()` | Copies base tables safely and idempotently |
+| ✅ Skips duplicates | Already archived tables won't be processed again |
+| ✅ Truncates + suffixes | Handles Redshift's 127-char table name limit |
+| ❗ Views not included | Future versions may handle views separately |
+
+---
+
+📌 This is **Phase 1 — Base Table Archiving**.  
+**Views** and more complex dependencies will come next!
