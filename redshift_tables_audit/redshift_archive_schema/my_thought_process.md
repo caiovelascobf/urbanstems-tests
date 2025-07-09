@@ -158,7 +158,7 @@ DECLARE
     suffix INT;
     was_truncated BOOLEAN;
     row_counter INT := 0;
-    max_limit INT := 2300;  -- Prevent overloading in one run
+    max_limit INT := 2400;  -- Prevent overloading in one run
 BEGIN
     FOR r IN
         SELECT schema_name, table_name
