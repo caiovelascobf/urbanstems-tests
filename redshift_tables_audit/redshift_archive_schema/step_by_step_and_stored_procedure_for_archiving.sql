@@ -70,12 +70,12 @@ DECLARE
     archive_table_name TEXT;
     base_table_name TEXT;
     source_table TEXT;
-    stmt VARCHAR(10000);  -- ← FIXED: allow long SQL statements
+    stmt VARCHAR(10000);
     exists_count INT;
     suffix INT;
     was_truncated BOOLEAN;
     row_counter INT := 0;
-    max_limit INT := 2400;  -- Adjust or remove for full run (each time you run, this will run the next "max_limit" after skipping the ones already there)
+    max_limit INT := 251;  -- Adjust this value for batch size
 BEGIN
     FOR r IN
         SELECT schema_name, table_name
@@ -84,7 +84,33 @@ BEGIN
     LOOP
         base_table_name := r.table_name;
 
-        -- Skip if this schema.table has already been archived
+        -- 🔒 Skip known broken tables manually
+        IF (r.schema_name = 'klaviyo' AND r.table_name IN (
+                'bounce__person__which of the below bouquet styles appeals most to you?',
+                'bounce__person__which of the following influences your purchasing decision?',
+                'bounce__person__which of these do you like?',
+                'bounce__person__which type of flower do you like?',
+                'dropped_email__person__which of the below bouquet styles appeals most to you?',
+                'dropped_email__person__which of the following influences your purchasing decision?',
+                'dropped_email__person__which of these do you like?',
+                'dropped_email__person__which type of flower do you like?',
+                'mark_as_spam__person__which of the below bouquet styles appeals most to you?',
+                'mark_as_spam__person__which of the following influences your purchasing decision?',
+                'mark_as_spam__person__which of these do you like?',
+                'mark_as_spam__person__which type of flower do you like?',
+                'unsub_list__person__which of the below bouquet styles appeals most to you?',
+                'unsub_list__person__which of the following influences your purchasing decision?',
+                'unsub_list__person__which type of flower do you like?',
+                'update_email_preferences__person__which of the below bouquet styles appeals most to you?',
+                'update_email_preferences__person__which of the following influences your purchasing decision?',
+                'update_email_preferences__person__which of these do you like?',
+                'update_email_preferences__person__which type of flower do you like?'
+            )) THEN
+            RAISE NOTICE '⚠️ Skipping hardcoded broken table %.%', r.schema_name, r.table_name;
+            CONTINUE;
+        END IF;
+
+        -- Skip if already archived
         IF EXISTS (
             SELECT 1
             FROM archive_tables.archive_table_mapping
@@ -103,13 +129,13 @@ BEGIN
         archive_table_name := base_table_name;
         was_truncated := FALSE;
 
-        -- Initial truncation if name exceeds limit
+        -- Truncate if name exceeds max length
         IF LENGTH(archive_table_name) > 127 THEN
             archive_table_name := SUBSTRING(archive_table_name FROM 1 FOR 127);
             was_truncated := TRUE;
         END IF;
 
-        -- Ensure uniqueness in archive_tables schema
+        -- Ensure archive_table_name is unique
         suffix := 1;
         LOOP
             SELECT COUNT(*) INTO exists_count
@@ -118,9 +144,7 @@ BEGIN
               AND table_name = archive_table_name;
             EXIT WHEN exists_count = 0;
 
-            -- ✅ SAFE ASSIGNMENT — broken up to avoid long intermediate string
-            archive_table_name := LEFT(base_table_name, 120);
-            archive_table_name := archive_table_name || '_' || suffix;
+            archive_table_name := LEFT(base_table_name, 120) || '_' || suffix;
 
             IF LENGTH(archive_table_name) > 127 THEN
                 archive_table_name := SUBSTRING(archive_table_name FROM 1 FOR 127);
@@ -130,9 +154,12 @@ BEGIN
             suffix := suffix + 1;
         END LOOP;
 
-        -- Build and execute copy statement
-        source_table := '"' || r.schema_name || '"."' || base_table_name || '"';
-        stmt := 'CREATE TABLE archive_tables."' || archive_table_name || '" AS SELECT * FROM ' || source_table || ';';
+        -- Safely quote schema and table
+        source_table := quote_ident(r.schema_name) || '.' || quote_ident(base_table_name);
+
+        -- Attempt to copy the table
+        stmt := 'CREATE TABLE archive_tables.' || quote_ident(archive_table_name) ||
+                ' AS SELECT * FROM ' || source_table || ';';
 
         BEGIN
             EXECUTE stmt;
@@ -142,13 +169,13 @@ BEGIN
                 CONTINUE;
         END;
 
-        -- Insert into archive mapping
+        -- Insert into archive_table_mapping
         stmt := 'INSERT INTO archive_tables.archive_table_mapping (' ||
                 'original_schema_name, original_table_name, archive_table_name, truncated' ||
-                ') VALUES (''' ||
-                r.schema_name || ''', ''' ||
-                base_table_name || ''', ''' ||
-                archive_table_name || ''', ' ||
+                ') VALUES (' ||
+                quote_literal(r.schema_name) || ', ' ||
+                quote_literal(base_table_name) || ', ' ||
+                quote_literal(archive_table_name) || ', ' ||
                 CASE WHEN was_truncated THEN 'true' ELSE 'false' END || ');';
         EXECUTE stmt;
     END LOOP;
