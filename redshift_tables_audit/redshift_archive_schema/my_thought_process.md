@@ -18,6 +18,7 @@ This document sets up and explains a robust, idempotent Redshift archival system
    - ✅ Skips any already archived
    - ✅ Truncates and suffixes names to meet Redshift constraints
    - ✅ Logs everything in a mapping table
+4. Another procedure validates the archived table counts
 
 ---
 
@@ -27,28 +28,15 @@ This document sets up and explains a robust, idempotent Redshift archival system
 CREATE SCHEMA IF NOT EXISTS analytics.archive_schemas;
 ```
 
-✅ Confirm creation:
-
-```sql
-SELECT *
-FROM information_schema.schemata
-WHERE schema_name = 'archive_schemas';
-```
-
 ---
 
 ## 📄 Step 2: Upload Archive Candidates File
 
-Manually upload this CSV to S3:
+Upload to:
 
 ```
 s3://caio-archive-redshift-objects/archive_candidates.csv
 ```
-
-Each row must define:
-- `schema_name`
-- `table_name`
-- `object_type` — Only `BASE TABLE` will be processed
 
 ---
 
@@ -58,20 +46,10 @@ Each row must define:
 CREATE TABLE archive_schemas.archive_candidates (
   schema_name VARCHAR,
   table_name VARCHAR,
-  object_type VARCHAR,      -- 'BASE TABLE' or 'VIEW'
+  object_type VARCHAR,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
-
-✅ Verify the table exists:
-
-```sql
-SELECT *
-FROM information_schema.tables
-WHERE table_schema = 'archive_schemas' AND table_name = 'archive_candidates';
-```
-
-🚛 Load CSV contents:
 
 ```sql
 COPY archive_schemas.archive_candidates(schema_name, table_name, object_type)
@@ -79,13 +57,6 @@ FROM 's3://caio-archive-redshift-objects/archive_candidates.csv'
 IAM_ROLE 'arn:aws:iam::045322402851:role/redshift_s3_access'
 FORMAT AS CSV
 IGNOREHEADER 1;
-```
-
-✅ Confirm load:
-
-```sql
-SELECT COUNT(*) 
-FROM archive_schemas.archive_candidates;
 ```
 
 ---
@@ -96,47 +67,23 @@ FROM archive_schemas.archive_candidates;
 CREATE SCHEMA IF NOT EXISTS analytics.archive_tables;
 ```
 
-✅ Confirm schema exists:
-
-```sql
-SELECT *
-FROM information_schema.schemata
-WHERE schema_name = 'archive_tables';
-```
-
-🔎 View current contents:
-
-```sql
-SELECT *
-FROM information_schema.tables
-WHERE table_schema = 'archive_tables';
-```
-
 ---
 
 ## 🔗 Step 5: Create Archive Mapping Table
 
-This table logs original → archived mappings:
-
 ```sql
 CREATE TABLE IF NOT EXISTS archive_tables.archive_table_mapping (
-    original_schema_name TEXT,
-    original_table_name TEXT,
-    archive_table_name TEXT,
-    truncated BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  original_schema_name TEXT,
+  original_table_name TEXT,
+  archive_table_name TEXT,
+  truncated BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-```
-
-✅ Check mappings:
-
-```sql
-SELECT * FROM archive_tables.archive_table_mapping;
 ```
 
 ---
 
-## ⚙️ Step 6: Create the Archive Procedure
+## ⚙️ Step 6: Archive Procedure
 
 ```sql
 CREATE OR REPLACE PROCEDURE archive_tables.copy_from_archive_candidates()
@@ -263,20 +210,102 @@ $$ LANGUAGE plpgsql;
 
 ---
 
-## ▶️ Step 7: Run the Procedure
+## ✅ Step 7: Create Count Validation Table
 
 ```sql
-CALL archive_tables.copy_from_archive_candidates();
+CREATE TABLE IF NOT EXISTS archive_schemas.archive_table_count_validation (
+  original_schema_name TEXT,
+  original_table_name TEXT,
+  archive_table_name TEXT,
+  truncated BOOLEAN,
+  original_count BIGINT,
+  archive_count BIGINT,
+  counts_match INT,
+  validated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 ```
-
-You can run this repeatedly — it will only archive new `BASE TABLES` not yet mapped.
 
 ---
 
-## 📊 Step 8: View Archived Mappings
+## 🧪 Step 8: Create Count Validation Procedure
 
 ```sql
-SELECT * FROM archive_tables.archive_table_mapping;
+CREATE OR REPLACE PROCEDURE archive_schemas.validate_archive_counts()
+AS $$
+DECLARE
+    r RECORD;
+    original_count BIGINT;
+    archive_count BIGINT;
+    counts_match INT;
+    stmt VARCHAR(10000);
+BEGIN
+    FOR r IN
+        SELECT original_schema_name, original_table_name, archive_table_name, truncated
+        FROM archive_tables.archive_table_mapping
+    LOOP
+        original_count := NULL;
+        archive_count := NULL;
+
+        -- Count original
+        BEGIN
+            EXECUTE 'SELECT COUNT(*) FROM ' || quote_ident(r.original_schema_name) || '.' || quote_ident(r.original_table_name)
+            INTO original_count;
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE NOTICE '⚠️ Failed to count %.% — %', r.original_schema_name, r.original_table_name, SQLERRM;
+        END;
+
+        -- Count archive
+        BEGIN
+            EXECUTE 'SELECT COUNT(*) FROM archive_tables.' || quote_ident(r.archive_table_name)
+            INTO archive_count;
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE NOTICE '⚠️ Failed to count archive copy % — %', r.archive_table_name, SQLERRM;
+        END;
+
+        -- Compare
+        IF original_count IS NOT NULL AND archive_count IS NOT NULL AND original_count = archive_count THEN
+            counts_match := 1;
+        ELSE
+            counts_match := 0;
+        END IF;
+
+        -- Insert result
+        stmt := 'INSERT INTO archive_schemas.archive_table_count_validation (' ||
+                'original_schema_name, original_table_name, archive_table_name, truncated, ' ||
+                'original_count, archive_count, counts_match' ||
+                ') VALUES (' ||
+                quote_literal(r.original_schema_name) || ', ' ||
+                quote_literal(r.original_table_name) || ', ' ||
+                quote_literal(r.archive_table_name) || ', ' ||
+                CASE WHEN r.truncated THEN 'true' ELSE 'false' END || ', ' ||
+                COALESCE(original_count::TEXT, 'NULL') || ', ' ||
+                COALESCE(archive_count::TEXT, 'NULL') || ', ' ||
+                counts_match || ');';
+
+        EXECUTE stmt;
+    END LOOP;
+
+    RAISE NOTICE '✅ Archive validation complete.';
+END;
+$$ LANGUAGE plpgsql;
+```
+
+---
+
+## ▶️ Run Validation
+
+```sql
+CALL archive_schemas.validate_archive_counts();
+```
+
+---
+
+## 📊 Check Results
+
+```sql
+SELECT * FROM archive_schemas.archive_table_count_validation;
 ```
 
 ---
@@ -285,14 +314,9 @@ SELECT * FROM archive_tables.archive_table_mapping;
 
 | Step | Purpose |
 |------|---------|
-| archive_candidates | Stores candidate `BASE TABLES` for deprecation |
-| archive_table_mapping | Tracks copies and final archive names |
-| `copy_from_archive_candidates()` | Copies base tables safely and idempotently |
-| ✅ Skips duplicates | Already archived tables won't be processed again |
-| ✅ Truncates + suffixes | Handles Redshift's 127-char table name limit |
-| ❗ Views not included | Future versions may handle views separately |
-
----
-
-📌 This is **Phase 1 — Base Table Archiving**.  
-**Views** and more complex dependencies will come next!
+| `archive_candidates` | Tracks base tables flagged for archiving |
+| `archive_table_mapping` | Logs copied table names and truncation info |
+| `archive_table_count_validation` | Verifies row-level equivalency |
+| `copy_from_archive_candidates()` | Main archiving routine |
+| `validate_archive_counts()` | Row count consistency checker |
+```

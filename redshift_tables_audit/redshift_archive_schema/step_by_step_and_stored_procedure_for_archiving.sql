@@ -184,6 +184,81 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Create table to  match counts after archiving
+-- DROP TABLE archive_schemas.archive_table_count_validation
+CREATE TABLE IF NOT EXISTS archive_schemas.archive_table_count_validation (
+    original_schema_name TEXT,
+    original_table_name TEXT,
+    archive_table_name TEXT,
+    truncated BOOLEAN,
+    original_count BIGINT,
+    archive_count BIGINT,
+    counts_match BOOLEAN,
+    validated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+
+-- Stored Procedure to Match Counts after Archiving
+CREATE OR REPLACE PROCEDURE archive_schemas.validate_archive_counts()
+AS $$
+DECLARE
+    r RECORD;
+    original_count BIGINT;
+    archive_count BIGINT;
+    counts_match INT;
+    stmt VARCHAR(10000);  -- 👈 fixed to avoid Redshift compile error
+BEGIN
+    FOR r IN
+        SELECT original_schema_name, original_table_name, archive_table_name, truncated
+        FROM archive_tables.archive_table_mapping
+    LOOP
+        original_count := NULL;
+        archive_count := NULL;
+
+        -- Count original table
+        BEGIN
+            EXECUTE 'SELECT COUNT(*) FROM ' || quote_ident(r.original_schema_name) || '.' || quote_ident(r.original_table_name)
+            INTO original_count;
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE NOTICE '⚠️ Failed to count %.% — %', r.original_schema_name, r.original_table_name, SQLERRM;
+        END;
+
+        -- Count archive table
+        BEGIN
+            EXECUTE 'SELECT COUNT(*) FROM archive_tables.' || quote_ident(r.archive_table_name)
+            INTO archive_count;
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE NOTICE '⚠️ Failed to count archive copy % — %', r.archive_table_name, SQLERRM;
+        END;
+
+        -- Evaluate match
+        IF original_count IS NOT NULL AND archive_count IS NOT NULL AND original_count = archive_count THEN
+            counts_match := 1;
+        ELSE
+            counts_match := 0;
+        END IF;
+
+        -- Insert results
+        stmt := 'INSERT INTO archive_schemas.archive_table_count_validation (' ||
+                'original_schema_name, original_table_name, archive_table_name, truncated, ' ||
+                'original_count, archive_count, counts_match' ||
+                ') VALUES (' ||
+                quote_literal(r.original_schema_name) || ', ' ||
+                quote_literal(r.original_table_name) || ', ' ||
+                quote_literal(r.archive_table_name) || ', ' ||
+                CASE WHEN r.truncated THEN 'true' ELSE 'false' END || ', ' ||
+                COALESCE(original_count::TEXT, 'NULL') || ', ' ||
+                COALESCE(archive_count::TEXT, 'NULL') || ', ' ||
+                counts_match || ');';
+
+        EXECUTE stmt;
+    END LOOP;
+
+    RAISE NOTICE '✅ Archive validation complete.';
+END;
+$$ LANGUAGE plpgsql;
 
 -- Old code, from when I tried copy all schemas with their tables in the archive_schema
 -- Create first table with unique schemas
