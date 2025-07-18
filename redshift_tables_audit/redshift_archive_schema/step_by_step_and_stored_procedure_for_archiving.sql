@@ -62,7 +62,11 @@ CALL archive_tables.copy_from_archive_candidates()
 -- Check all tables mapping (after the procedure was called)
 SELECT * FROM archive_tables.archive_table_mapping;
 
--- The Stored Procedure
+SELECT COUNT(*) FROM (SELECT *
+FROM information_schema.tables
+WHERE table_schema = 'archive_tables')
+
+-- The Stored Procedure to copy tables from the archive_candidates table
 CREATE OR REPLACE PROCEDURE archive_tables.copy_from_archive_candidates()
 AS $$
 DECLARE
@@ -75,7 +79,7 @@ DECLARE
     suffix INT;
     was_truncated BOOLEAN;
     row_counter INT := 0;
-    max_limit INT := 251;  -- Adjust this value for batch size
+    max_limit INT := 1;  -- Adjust this value for batch size
 BEGIN
     FOR r IN
         SELECT schema_name, table_name
@@ -107,6 +111,12 @@ BEGIN
                 'update_email_preferences__person__which type of flower do you like?'
             )) THEN
             RAISE NOTICE '⚠️ Skipping hardcoded broken table %.%', r.schema_name, r.table_name;
+            CONTINUE;
+        END IF;
+
+        -- 🔒 Skip internal system schema
+        IF r.schema_name = 'pg_automv' THEN
+            RAISE NOTICE '⚠️ Skipping internal auto MV table %.%', r.schema_name, r.table_name;
             CONTINUE;
         END IF;
 
@@ -197,8 +207,13 @@ CREATE TABLE IF NOT EXISTS archive_schemas.archive_table_count_validation (
     validated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Call Archive Count Prodedure
+CALL archive_schemas.validate_archive_counts();
 
--- Stored Procedure to Match Counts after Archiving
+-- Check if they matched
+SELECT * FROM archive_schemas.archive_table_count_validation WHERE counts_match IS FALSE;
+
+-- Stored Procedure to Validate Archive Counts
 CREATE OR REPLACE PROCEDURE archive_schemas.validate_archive_counts()
 AS $$
 DECLARE
@@ -260,35 +275,280 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Old code, from when I tried copy all schemas with their tables in the archive_schema
--- Create first table with unique schemas
--- CREATE TABLE IF NOT EXISTS archive_schemas.unique_schemas (
---     schema_name VARCHAR
--- );
+-- Create a tables to log the dropping procedure
+CREATE TABLE IF NOT EXISTS archive_schemas.original_table_drop_log (
+    original_schema_name TEXT,
+    original_table_name TEXT,
+    drop_succeeded BOOLEAN,
+    error_message TEXT,
+    dropped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
--- Copy script_01_unique_schemas.csv to a table in archive
--- COPY archive_schemas.unique_schemas(schema_name)
--- FROM 's3://caio-archive-redshift-objects/script_01_unique_schemas.csv'
--- IAM_ROLE 'arn:aws:iam::045322402851:role/redshift_s3_access'
--- FORMAT AS CSV
--- IGNOREHEADER 1;
+-- Call Log Procedure that Drops archived tables from their origin
+CALL archive_schemas.drop_original_tables();
 
--- Check the archive.unique_schemas
--- SELECT * FROM archive_schemas.unique_schemas;
+-- Check the log
+SELECT COUNT(*) FROM archive_schemas.original_table_drop_log;
+SELECT * FROM archive_schemas.original_table_drop_log WHERE original_schema_name LIKE '%zendesk%';
 
--- Create table to map original to truncated tables after moving tables
--- CREATE TABLE IF NOT EXISTS archive_schemas.archive_schema_mapping (
---     original_schema_name TEXT,
---     archive_schema_name TEXT,
---     truncated BOOLEAN DEFAULT FALSE,
---     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
--- );
+-- STORE PROCEDURE TO DROP ALL TABLES
+CREATE OR REPLACE PROCEDURE archive_schemas.drop_original_tables()
+AS $$
+DECLARE
+    r RECORD;
+    stmt VARCHAR(10000);
+    row_counter INT := 0;
+    max_limit INT := 50;  -- Adjust for batch size
+    drop_success BOOLEAN;
+    err_msg TEXT;
+BEGIN
+    FOR r IN
+        SELECT m.original_schema_name,
+               m.original_table_name
+        FROM archive_tables.archive_table_mapping m
+        LEFT JOIN archive_schemas.original_table_drop_log l
+               ON m.original_schema_name = l.original_schema_name
+              AND m.original_table_name = l.original_table_name
+              AND l.drop_succeeded = TRUE
+        WHERE l.original_table_name IS NULL
+    LOOP
+        row_counter := row_counter + 1;
 
--- Check the archive.archive_name_mapping
--- SELECT * FROM archive_schemas.archive_schema_mapping;
+        IF row_counter > max_limit THEN
+            RAISE NOTICE '⏸️ Limit of % reached, stopping batch.', max_limit;
+            RETURN;
+        END IF;
 
--- Run Stored Procedure to Load CSVs from S3 bucket
--- CALL archive_schemas.create_table_and_load_csv_to_archive_schema(); 
+        drop_success := FALSE;
+        err_msg := NULL;
 
--- Check one of the tables
--- SELECT * FROM archive_schemas.adwords;
+        -- Attempt to drop the original table with CASCADE
+        BEGIN
+            stmt := 'DROP TABLE ' || quote_ident(r.original_schema_name) || '.' || quote_ident(r.original_table_name) || ' CASCADE;';
+            EXECUTE stmt;
+            drop_success := TRUE;
+            -- Notice suppressed for successful drop
+        EXCEPTION
+            WHEN OTHERS THEN
+                drop_success := FALSE;
+                err_msg := SQLERRM;
+                RAISE NOTICE '❌ Failed to drop %.%: %', r.original_schema_name, r.original_table_name, err_msg;
+        END;
+
+        -- Log result
+        stmt := 'INSERT INTO archive_schemas.original_table_drop_log (' ||
+                'original_schema_name, original_table_name, drop_succeeded, error_message' ||
+                ') VALUES (' ||
+                quote_literal(r.original_schema_name) || ', ' ||
+                quote_literal(r.original_table_name) || ', ' ||
+                CASE WHEN drop_success THEN 'true' ELSE 'false' END || ', ' ||
+                CASE WHEN err_msg IS NOT NULL THEN quote_literal(err_msg) ELSE 'NULL' END ||
+                ');';
+        EXECUTE stmt;
+    END LOOP;
+
+    RAISE NOTICE '🏁 Drop procedure complete. % attempted.', row_counter;
+END;
+$$ LANGUAGE plpgsql;
+
+
+---------- NOW, LET'S DO ARCHIVE VIEWS --------------
+
+-- Create the 'archive_tables' schema
+CREATE SCHEMA IF NOT EXISTS analytics.archive_views;
+
+-- DROP TABLE archive_views.archive_view_mapping;
+
+CREATE TABLE analytics.archive_views.archive_view_mapping (
+    original_schema_name VARCHAR(65535),  -- Source schema of the original view (e.g., dbt_egiant)
+    original_view_name   VARCHAR(65535),  -- Original view name to be archived
+    archive_view_name    VARCHAR(65535),  -- Final archived view name (may be truncated or suffixed)
+    truncated            BOOLEAN DEFAULT FALSE,  -- Whether the archived name was truncated to meet length limits
+    is_view_broken       BOOLEAN DEFAULT FALSE,  -- True if SELECT * FROM original view failed (view is broken at source)
+    create_error         BOOLEAN DEFAULT FALSE,  -- True if CREATE VIEW failed during recreation (e.g., invalid DDL)
+    broken_reason        VARCHAR(65535),  -- Text of the exception or reason for failure
+    view_definition      VARCHAR(65535),  -- Raw DDL as captured by SHOW VIEW
+    created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP  -- Timestamp of processing
+);
+
+SELECT * FROM archive_views.archive_view_mapping;
+
+-- THE PYTHON SCRIPT THAT ARCHIVE VIEWS GOES BELOW, PLEASE UNCOMMENT IT AND RUN LOCALLY. 
+-- IT WILL CONNECT TO REDSHIFT IF YOU CREATE A .ENV FILE WITH YOUR CONNECTION DETAILS
+--import os
+--import re
+--import psycopg2
+--from psycopg2 import sql
+--from dotenv import load_dotenv
+--
+--# Load environment variables
+--load_dotenv()
+--
+--# Config
+--MAX_LIMIT = 50
+--ARCHIVE_SCHEMA = "archive_views"
+--MAPPING_TABLE = "analytics.archive_views.archive_view_mapping"
+--MAX_VIEW_NAME_LENGTH = 127
+--
+--# Connect to Redshift
+--conn = psycopg2.connect(
+--    host=os.getenv("REDSHIFT_HOST"),
+--    port=os.getenv("REDSHIFT_PORT", "5439"),
+--    dbname=os.getenv("REDSHIFT_DBNAME"),
+--    user=os.getenv("REDSHIFT_USER_NAME"),
+--    password=os.getenv("REDSHIFT_PASSWORD")
+--)
+--conn.autocommit = True
+--cur = conn.cursor()
+--
+--archived_count = 0
+--skipped_broken = 0
+--
+--# Fetch batch
+--cur.execute(sql.SQL(f"""
+--    SELECT schema_name, table_name
+--    FROM archive_schemas.archive_candidates c
+--    WHERE object_type = 'VIEW'
+--    AND NOT EXISTS (
+--        SELECT 1
+--        FROM {MAPPING_TABLE} m
+--        WHERE m.original_schema_name = c.schema_name
+--          AND m.original_view_name = c.table_name
+--    )
+--    LIMIT %s
+--"""), (MAX_LIMIT,))
+--views = cur.fetchall()
+--
+--for schema, view in views:
+--    print(f"\n🔍 Archiving view: {schema}.{view}")
+--    archive_view = view
+--    was_truncated = False
+--    ddl = None
+--    broken_reason = None
+--    is_broken = False
+--
+--    # Truncate if needed
+--    if len(archive_view) > MAX_VIEW_NAME_LENGTH:
+--        archive_view = archive_view[:MAX_VIEW_NAME_LENGTH]
+--        was_truncated = True
+--
+--    # Ensure uniqueness
+--    suffix = 1
+--    base_name = archive_view
+--    while True:
+--        cur.execute(sql.SQL("""
+--            SELECT 1
+--            FROM information_schema.views
+--            WHERE table_schema = %s AND table_name = %s
+--        """), (ARCHIVE_SCHEMA, archive_view))
+--        if not cur.fetchone():
+--            break
+--        suffix_str = f"_{suffix}"
+--        archive_view = base_name[:MAX_VIEW_NAME_LENGTH - len(suffix_str)] + suffix_str
+--        was_truncated = True
+--        suffix += 1
+--
+--    # Try to get the DDL (SHOW VIEW)
+--    try:
+--        cur.execute(sql.SQL("SHOW VIEW {}.{}").format(
+--            sql.Identifier(schema),
+--            sql.Identifier(view)
+--        ))
+--        ddl = cur.fetchone()[0]
+--    except Exception as e:
+--        broken_reason = f"SHOW VIEW error: {str(e).strip()}"
+--        print(f"❌ Failed to get DDL for {schema}.{view}: {broken_reason}")
+--        cur.execute(sql.SQL(f"""
+--            INSERT INTO {MAPPING_TABLE} (
+--                original_schema_name,
+--                original_view_name,
+--                archive_view_name,
+--                truncated,
+--                is_view_broken,
+--                broken_reason,
+--                view_definition
+--            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+--        """), (schema, view, archive_view, was_truncated, True, broken_reason, None))
+--        skipped_broken += 1
+--        continue
+--
+--    # Validate SELECT * FROM view
+--    try:
+--        cur.execute(sql.SQL("SELECT * FROM {}.{} LIMIT 1").format(
+--            sql.Identifier(schema),
+--            sql.Identifier(view)
+--        ))
+--    except Exception as e:
+--        is_broken = True
+--        broken_reason = str(e).strip()
+--        print(f"⚠️ View {schema}.{view} is broken and will be skipped: {broken_reason}")
+--
+--    # If broken, log and skip CREATE VIEW
+--    if is_broken:
+--        cur.execute(sql.SQL(f"""
+--            INSERT INTO {MAPPING_TABLE} (
+--                original_schema_name,
+--                original_view_name,
+--                archive_view_name,
+--                truncated,
+--                is_view_broken,
+--                broken_reason,
+--                view_definition
+--            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+--        """), (schema, view, archive_view, was_truncated, True, broken_reason, ddl))
+--        skipped_broken += 1
+--        continue
+--
+--    # Clean DDL for CREATE VIEW
+--    cleaned = ddl.strip()
+--    cleaned = re.sub(r'(?is)^.*?AS\s*\(', '', cleaned)
+--    cleaned = re.sub(r'\)\s+with no schema binding\s*;?\s*$', '', cleaned, flags=re.IGNORECASE)
+--    cleaned = re.sub(r'\)\s*$', '', cleaned.strip())
+--
+--    # CREATE the archived view
+--    create_sql = sql.SQL("CREATE VIEW {}.{} AS ({})").format(
+--        sql.Identifier(ARCHIVE_SCHEMA),
+--        sql.Identifier(archive_view),
+--        sql.SQL(cleaned)
+--    )
+--
+--    try:
+--        cur.execute(create_sql)
+--    except Exception as e:
+--        broken_reason = f"CREATE VIEW error: {str(e).strip()}"
+--        print(f"❌ Failed to create archived view {ARCHIVE_SCHEMA}.{archive_view}: {broken_reason}")
+--        cur.execute(sql.SQL(f"""
+--            INSERT INTO {MAPPING_TABLE} (
+--                original_schema_name,
+--                original_view_name,
+--                archive_view_name,
+--                truncated,
+--                is_view_broken,
+--                broken_reason,
+--                view_definition
+--            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+--        """), (schema, view, archive_view, was_truncated, True, broken_reason, ddl))
+--        skipped_broken += 1
+--        continue
+--
+--    # Log success
+--    cur.execute(sql.SQL(f"""
+--        INSERT INTO {MAPPING_TABLE} (
+--            original_schema_name,
+--            original_view_name,
+--            archive_view_name,
+--            truncated,
+--            is_view_broken,
+--            broken_reason,
+--            view_definition
+--        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+--    """), (schema, view, archive_view, was_truncated, False, None, ddl))
+--
+--    print(f"✅ Archived {schema}.{view} → {ARCHIVE_SCHEMA}.{archive_view}")
+--    archived_count += 1
+--
+--# Done
+--cur.close()
+--conn.close()
+--
+--print(f"\n🏁 Done. {archived_count} views archived, {skipped_broken} broken views logged.")

@@ -98,7 +98,7 @@ DECLARE
     suffix INT;
     was_truncated BOOLEAN;
     row_counter INT := 0;
-    max_limit INT := 251;  -- Adjust this value for batch size
+    max_limit INT := 1;  -- Adjust this value for batch size
 BEGIN
     FOR r IN
         SELECT schema_name, table_name
@@ -130,6 +130,12 @@ BEGIN
                 'update_email_preferences__person__which type of flower do you like?'
             )) THEN
             RAISE NOTICE '⚠️ Skipping hardcoded broken table %.%', r.schema_name, r.table_name;
+            CONTINUE;
+        END IF;
+
+        -- 🔒 Skip internal system schema
+        IF r.schema_name = 'pg_automv' THEN
+            RAISE NOTICE '⚠️ Skipping internal auto MV table %.%', r.schema_name, r.table_name;
             CONTINUE;
         END IF;
 
@@ -237,7 +243,7 @@ DECLARE
     original_count BIGINT;
     archive_count BIGINT;
     counts_match INT;
-    stmt VARCHAR(10000);
+    stmt VARCHAR(10000);  -- 👈 fixed to avoid Redshift compile error
 BEGIN
     FOR r IN
         SELECT original_schema_name, original_table_name, archive_table_name, truncated
@@ -246,7 +252,7 @@ BEGIN
         original_count := NULL;
         archive_count := NULL;
 
-        -- Count original
+        -- Count original table
         BEGIN
             EXECUTE 'SELECT COUNT(*) FROM ' || quote_ident(r.original_schema_name) || '.' || quote_ident(r.original_table_name)
             INTO original_count;
@@ -255,7 +261,7 @@ BEGIN
                 RAISE NOTICE '⚠️ Failed to count %.% — %', r.original_schema_name, r.original_table_name, SQLERRM;
         END;
 
-        -- Count archive
+        -- Count archive table
         BEGIN
             EXECUTE 'SELECT COUNT(*) FROM archive_tables.' || quote_ident(r.archive_table_name)
             INTO archive_count;
@@ -264,14 +270,14 @@ BEGIN
                 RAISE NOTICE '⚠️ Failed to count archive copy % — %', r.archive_table_name, SQLERRM;
         END;
 
-        -- Compare
+        -- Evaluate match
         IF original_count IS NOT NULL AND archive_count IS NOT NULL AND original_count = archive_count THEN
             counts_match := 1;
         ELSE
             counts_match := 0;
         END IF;
 
-        -- Insert result
+        -- Insert results
         stmt := 'INSERT INTO archive_schemas.archive_table_count_validation (' ||
                 'original_schema_name, original_table_name, archive_table_name, truncated, ' ||
                 'original_count, archive_count, counts_match' ||

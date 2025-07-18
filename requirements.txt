@@ -5,3 +5,4 @@ selenium # Automates web browser interaction from Python
 pandas
 sqlparse
 looker_sdk
+psycopg2-binary
